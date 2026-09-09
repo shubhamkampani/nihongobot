@@ -67,7 +67,7 @@ async def generate_gemini_response(prompt):
     url = "https://api.groq.com/openai/v1/chat/completions"
     
     payload = {
-        "model": "llama-3.1-8b-instant", # Updated, active Groq model
+        "model": "llama-3.3-70b-specdec", # Updated, active Groq model
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5
     }
