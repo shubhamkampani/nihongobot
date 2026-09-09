@@ -57,53 +57,37 @@ def extract_json(raw_text):
     cleaned = raw_text.strip().replace("```json", "").replace("```JSON", "").replace("```", "").strip()
     return json.loads(cleaned)
 
-# --- 🧠 DYNAMIC GOOGLE REST API (ZERO 404 ERRORS) ---
-ACTIVE_MODEL = None
-
-async def get_working_model(api_key):
-    global ACTIVE_MODEL
-    if ACTIVE_MODEL: return ACTIVE_MODEL
-    
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){api_key}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200: raise Exception(f"Failed to fetch authorized models. HTTP {resp.status}")
-            data = await resp.json()
-            
-            # Extract models that support text generation
-            models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            if not models: raise Exception("No text generation models authorized for this API key.")
-            
-            # Priority Logic
-            for m in models:
-                if '1.5-flash' in m: ACTIVE_MODEL = m; return m
-            for m in models:
-                if '1.5-pro' in m: ACTIVE_MODEL = m; return m
-            for m in models:
-                if 'gemini-pro' in m or '1.0' in m: ACTIVE_MODEL = m; return m
-                
-            ACTIVE_MODEL = models[0]
-            return ACTIVE_MODEL
-
+# --- 🧠 DIRECT GROQ REST API (SUPERFAST & ZERO 404 ERRORS) ---
 async def generate_gemini_response(prompt):
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key: raise Exception("API Key missing from Render Environment!")
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key: 
+        raise Exception("GROQ_API_KEY missing from Render Environment!")
+    
     clean_key = api_key.strip()
+    url = "https://api.groq.com/openai/v1/chat/completions"
     
-    model_name = await get_working_model(clean_key)
-    # model_name directly provides format "models/..."
-    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={clean_key}"
+    payload = {
+        "model": "llama3-8b-8192", # Lightning fast free model
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.5
+    }
     
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    headers = {
+        "Authorization": f"Bearer {clean_key}",
+        "Content-Type": "application/json"
+    }
+    
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}) as resp:
+        async with session.post(url, json=payload, headers=headers) as resp:
             if resp.status != 200:
                 err_text = await resp.text()
                 raise Exception(f"HTTP {resp.status}: {err_text}")
             
             data = await resp.json()
-            try: return data['candidates'][0]['content']['parts'][0]['text']
-            except KeyError: raise Exception("Google API returned invalid structure.")
+            try: 
+                return data['choices'][0]['message']['content']
+            except KeyError: 
+                raise Exception("API returned invalid structure.")
 
 # --- 🧠 PLACEMENT UI LOGIC ---
 class ForceClaimView(View):
