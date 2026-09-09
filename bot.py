@@ -59,7 +59,9 @@ class JLPTSelect(Select):
             discord.SelectOption(label="N2 Pre-Advanced", emoji="📍"),
             discord.SelectOption(label="N1 Advanced", emoji="📍")
         ]
-        super().__init__(placeholder="Select your target JLPT Level...", min_values=1, max_values=1, options=options)
+        # Yahan maine custom_id="jlpt_dropdown" add kar diya hai
+        super().__init__(placeholder="Select your target JLPT Level...", min_values=1, max_values=1, options=options, custom_id="jlpt_dropdown")
+
 
     async def callback(self, interaction: discord.Interaction):
         selected_level = self.values[0]
