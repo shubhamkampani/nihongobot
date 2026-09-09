@@ -91,11 +91,12 @@ async def generate_gemini_response(prompt):
     clean_key = api_key.strip()
     url = "https://api.groq.com/openai/v1/chat/completions"
     
-    payload = {
-        "model": "openai/gpt-oss-20b", # Updated, active Groq model
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5
-    }
+        payload = {
+            "model": "openai/gpt-oss-20b", 
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.5,
+            "max_tokens": 6000  # <--- Added this to allow full 20 questions without cutting off
+        }
 
     headers = {
         "Authorization": f"Bearer {clean_key}",
@@ -134,11 +135,16 @@ class ForceClaimView(View):
         if role: await interaction.user.add_roles(role)
         await interaction.response.edit_message(content=f"✅ You chose to keep your selected level. You are now an **{self.target_role}**!", view=None, embed=None)
 
-class PlacementQuizView(View):
-    def __init__(self, user, question_data, target_role_name, is_changerole=False):
-        super().__init__(timeout=60)
-        self.user, self.q, self.target_role = user, question_data, target_role_name
-        self.is_changerole = is_changerole
+class QuizView(View):
+    def __init__(self, user, questions, level, start_time):
+        super().__init__(timeout=60) 
+        self.user = user
+        self.questions = questions
+        self.level = level
+        self.current_idx = 0
+        self.score = 0
+        self.start_time = start_time
+        self.total_q = len(questions) # Smartly counts exactly how many questions exist
         
         for label in ["A", "B", "C", "D"]:
             btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
@@ -146,31 +152,26 @@ class PlacementQuizView(View):
             self.add_item(btn)
 
     async def button_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user.id: return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
-        self.stop()
-        role = discord.utils.get(interaction.guild.roles, name=self.target_role)
-        passed = (interaction.data['custom_id'] == self.q['answer'])
-
-        if passed:
-            if self.is_changerole:
-                for r in interaction.user.roles:
-                    if r.name in ROLE_NAMES: await interaction.user.remove_roles(r)
-            if role: await interaction.user.add_roles(role)
-            await interaction.response.edit_message(content=f"🎉 **Correct!** You proved your skills. You are now an **{self.target_role}**!", embed=None, view=None)
+        if interaction.user.id != self.user.id: 
+            return await interaction.response.send_message("❌ Not your quiz!", ephemeral=True)
+            
+        if interaction.data['custom_id'] == self.questions[self.current_idx]['answer']: 
+            self.score += 1
+            
+        self.current_idx += 1
+        
+        if self.current_idx < self.total_q:
+            q = self.questions[self.current_idx]
+            embed = discord.Embed(title=f"🎌 {self.level} Mock Test ({self.current_idx + 1}/{self.total_q})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            await interaction.response.edit_message(embed=embed, view=self)
         else:
-            if self.is_changerole:
-                await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed.", embed=None, view=None)
-            else:
-                fallback = get_fallback_role(self.target_role)
-                if fallback == self.target_role:
-                    if role: await interaction.user.add_roles(role)
-                    await interaction.response.edit_message(content=f"❌ Incorrect! But since you selected Beginner, you are now an **{self.target_role}**.", embed=None, view=None)
-                else:
-                    embed = discord.Embed(title="⚠️ Placement Test Failed", description=f"The correct answer was **{self.q['answer']}**.\n\nWe recommend starting at **{fallback}**, but you can choose to force-claim your selected **{self.target_role}** role.", color=discord.Color.orange())
-                    await interaction.response.edit_message(content="", embed=embed, view=ForceClaimView(self.user, self.target_role, fallback))
+            self.stop()
+            time_taken = round(time.time() - self.start_time)
+            quiz_db.update_one({"_id": self.user.id}, {"$set": {"level": self.level, "score": self.score, "time_taken": time_taken}}, upsert=True)
+            await interaction.response.edit_message(embed=discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/{self.total_q}** in {time_taken}s.", color=discord.Color.green()), view=None)
 
     async def on_timeout(self):
-        try: await self.message.edit(content="⏳ **Time's up!** Please select your role again to retry the test.", view=None, embed=None)
+        try: await self.message.edit(content="⏳ **Time's up!** Attempt cancelled to prevent spam.", view=None, embed=None)
         except: pass
 
 # --- 🌸 ONBOARDING UI ---
