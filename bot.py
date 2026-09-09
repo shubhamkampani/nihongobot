@@ -50,12 +50,29 @@ def get_fallback_role(current_role_name):
         return ROLE_NAMES[0]
 
 def extract_json(raw_text):
-    match = re.search(r'\[\s*\{.*?\}\s*\]', raw_text, re.DOTALL)
-    if match: return json.loads(match.group(0))
-    match_dict = re.search(r'\{.*?\}', raw_text, re.DOTALL)
-    if match_dict: return [json.loads(match_dict.group(0))]
+    """Ultra-smart JSON extractor and auto-repair for flaky AI outputs"""
+    # 1. First, strip all markdown blocks and whitespace
     cleaned = raw_text.strip().replace("```json", "").replace("```JSON", "").replace("```", "").strip()
-    return json.loads(cleaned)
+    
+    # 2. Try direct extraction
+    match = re.search(r'\[\s*\{.*?\}\s*\]', cleaned, re.DOTALL)
+    match_dict = re.search(r'\{.*?\}', cleaned, re.DOTALL)
+    
+    json_string = None
+    if match: json_string = match.group(0)
+    elif match_dict: json_string = "[" + match_dict.group(0) + "]"
+    else: json_string = cleaned
+    
+    # 3. Clean trailing commas (a very common AI hallucination causing JSONDecodeError)
+    json_string = re.sub(r',\s*([\]}])', r'\1', json_string)
+    
+    # 4. Try parsing it safely
+    try:
+        return json.loads(json_string)
+    except json.JSONDecodeError as e:
+        print(f"⚠️ JSON Decode Error details: {e}\nRaw Output was:\n{json_string}")
+        # Absolute fallback: Return a safe dummy question if the AI completely broke the JSON
+        return [{"question": "AI Formatting Error: Please try clicking again.", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
 # --- 🧠 DIRECT GROQ REST API (SUPERFAST & ZERO 404 ERRORS) ---
 async def generate_gemini_response(prompt):
