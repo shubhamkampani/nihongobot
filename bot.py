@@ -4,6 +4,7 @@ from discord import app_commands
 from discord.ui import View, Button, Select
 import os
 import json
+import re
 import random
 from threading import Thread
 from flask import Flask
@@ -47,9 +48,18 @@ def has_main_role(member):
 def get_fallback_role(current_role_name):
     try:
         idx = ROLE_NAMES.index(current_role_name)
-        return ROLE_NAMES[max(0, idx - 1)] # Returns N5 if N5 is selected, else one level down
+        return ROLE_NAMES[max(0, idx - 1)]
     except ValueError:
         return ROLE_NAMES[0]
+
+def extract_json(raw_text):
+    """Smart JSON extractor to bypass markdown tags from Gemini AI"""
+    match = re.search(r'\[\s*\{.*?\}\s*\]', raw_text, re.DOTALL)
+    if match: return json.loads(match.group(0))
+    match_dict = re.search(r'\{.*?\}', raw_text, re.DOTALL)
+    if match_dict: return [json.loads(match_dict.group(0))]
+    cleaned = raw_text.strip().replace("```json", "").replace("```JSON", "").replace("```", "").strip()
+    return json.loads(cleaned)
 
 # --- 🧠 PLACEMENT UI LOGIC ---
 class ForceClaimView(View):
@@ -99,7 +109,7 @@ class PlacementQuizView(View):
             await interaction.response.edit_message(content=msg, embed=None, view=None)
         else:
             if self.is_changerole:
-                await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed. Keep studying!", embed=None, view=None)
+                await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed.", embed=None, view=None)
             else:
                 fallback = get_fallback_role(self.target_role)
                 if fallback == self.target_role:
@@ -130,15 +140,16 @@ class JLPTSelect(Select):
         prompt = f"""Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
         
         try:
-            raw_text = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
-            q = json.loads(raw_text)[0]
+            # Using async call to prevent Discord timeout
+            response = await model.generate_content_async(prompt)
+            q = extract_json(response.text)[0]
             embed = discord.Embed(title=f"🎌 {level_short} Placement Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
             embed.set_footer(text="⏳ You have 60 seconds to answer.")
             view = PlacementQuizView(interaction.user, q, selected_role)
             msg = await interaction.edit_original_response(content="", embed=embed, view=view)
             view.message = msg
-        except Exception:
-            await interaction.edit_original_response(content=f"❌ AI Error generating placement test. Please try again.")
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Error generating placement test. Please try again. ({e})")
 
 class WelcomeView(View):
     def __init__(self): super().__init__(timeout=None)
@@ -239,14 +250,14 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     await interaction.followup.send(f"⏳ Generating a Medium-Hard upgrade test for {lvl_short}...", ephemeral=True)
     prompt = f"""Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium to Hard. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
     try:
-        raw_text = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
-        q = json.loads(raw_text)[0]
+        response = await model.generate_content_async(prompt)
+        q = extract_json(response.text)[0]
         embed = discord.Embed(title=f"🎌 {lvl_short} Upgrade Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0xe67e22)
         embed.set_footer(text="Pass this to upgrade your role! You have 60 seconds.")
         view = PlacementQuizView(interaction.user, q, target_level.value, is_changerole=True)
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
-    except Exception: await interaction.edit_original_response(content="❌ AI Error. Please try again.")
+    except Exception as e: await interaction.edit_original_response(content=f"❌ AI Error. Please try again. ({e})")
 
 @bot.tree.command(name="quiz", description="Take a 20-question JLPT mock test.")
 async def quiz(interaction: discord.Interaction):
@@ -256,13 +267,13 @@ async def quiz(interaction: discord.Interaction):
     await interaction.followup.send(f"⏳ Generating 20 {user_level} questions...", ephemeral=True)
     prompt = f"""Generate 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
     try:
-        raw_text = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
-        questions_data = json.loads(raw_text)
+        response = await model.generate_content_async(prompt)
+        questions_data = extract_json(response.text)
         q = questions_data[0]
         embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/20)", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
         view = QuizView(interaction.user, questions_data, user_level, time.time())
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
-    except Exception: await interaction.edit_original_response(content=f"❌ AI Error. Please try again.")
+    except Exception as e: await interaction.edit_original_response(content=f"❌ AI Error. Please try again. ({e})")
 
 bot.run(os.environ.get("BOT_TOKEN"))
