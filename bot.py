@@ -22,9 +22,17 @@ def run(): app.run(host='0.0.0.0', port=8000)
 Thread(target=run).start()
 
 # --- 🗄️ DATABASE SETUP ---
+import urllib.parse
+
 MONGO_URI = os.environ.get("MONGO_URI")
 try:
-    cluster = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    # URL encoded password parser ensures special characters don't break the URI
+    parsed_uri = urllib.parse.unquote(MONGO_URI)
+    cluster = MongoClient(parsed_uri, serverSelectionTimeoutMS=5000)
+    
+    # Test the connection directly
+    cluster.admin.command('ping')
+    
     db = cluster["nihongo_db"]
     quiz_db = db["weekly_scores"]
     print("✅ MongoDB Connected!")
