@@ -67,11 +67,11 @@ async def generate_gemini_response(prompt):
     url = "https://api.groq.com/openai/v1/chat/completions"
     
     payload = {
-        "model": "llama3-8b-8192", # Lightning fast free model
+        "model": "llama-3.3-70b-versatile", # Updated, active Groq model
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5
     }
-    
+
     headers = {
         "Authorization": f"Bearer {clean_key}",
         "Content-Type": "application/json"
