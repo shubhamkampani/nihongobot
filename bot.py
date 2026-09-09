@@ -64,7 +64,10 @@ async def generate_gemini_response(prompt):
     if not api_key:
         raise Exception("API Key missing from Render Environment!")
     
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){api_key}"
+    # FIX: .strip() removes any accidental hidden spaces or newlines from Render
+    clean_key = api_key.strip()
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}]
     }
@@ -73,7 +76,7 @@ async def generate_gemini_response(prompt):
         async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}) as resp:
             if resp.status != 200:
                 err_text = await resp.text()
-                raise Exception(f"HTTP {resp.status}: {err_text}") # Gives exact Google Error
+                raise Exception(f"HTTP {resp.status}: {err_text}")
             
             data = await resp.json()
             try:
