@@ -50,7 +50,6 @@ def get_fallback_role(current_role_name):
         return ROLE_NAMES[0]
 
 def extract_json(raw_text):
-    """Smart JSON extractor to bypass markdown tags"""
     match = re.search(r'\[\s*\{.*?\}\s*\]', raw_text, re.DOTALL)
     if match: return json.loads(match.group(0))
     match_dict = re.search(r'\{.*?\}', raw_text, re.DOTALL)
@@ -58,20 +57,44 @@ def extract_json(raw_text):
     cleaned = raw_text.strip().replace("```json", "").replace("```JSON", "").replace("```", "").strip()
     return json.loads(cleaned)
 
-# --- 🧠 DIRECT GOOGLE REST API BYPASS (No Flaky SDK) ---
+# --- 🧠 DYNAMIC GOOGLE REST API (ZERO 404 ERRORS) ---
+ACTIVE_MODEL = None
+
+async def get_working_model(api_key):
+    global ACTIVE_MODEL
+    if ACTIVE_MODEL: return ACTIVE_MODEL
+    
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){api_key}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200: raise Exception(f"Failed to fetch authorized models. HTTP {resp.status}")
+            data = await resp.json()
+            
+            # Extract models that support text generation
+            models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            if not models: raise Exception("No text generation models authorized for this API key.")
+            
+            # Priority Logic
+            for m in models:
+                if '1.5-flash' in m: ACTIVE_MODEL = m; return m
+            for m in models:
+                if '1.5-pro' in m: ACTIVE_MODEL = m; return m
+            for m in models:
+                if 'gemini-pro' in m or '1.0' in m: ACTIVE_MODEL = m; return m
+                
+            ACTIVE_MODEL = models[0]
+            return ACTIVE_MODEL
+
 async def generate_gemini_response(prompt):
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise Exception("API Key missing from Render Environment!")
-    
-    # FIX: .strip() removes any accidental hidden spaces or newlines from Render
+    if not api_key: raise Exception("API Key missing from Render Environment!")
     clean_key = api_key.strip()
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    model_name = await get_working_model(clean_key)
+    # model_name directly provides format "models/..."
+    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={clean_key}"
     
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}) as resp:
             if resp.status != 200:
@@ -79,10 +102,8 @@ async def generate_gemini_response(prompt):
                 raise Exception(f"HTTP {resp.status}: {err_text}")
             
             data = await resp.json()
-            try:
-                return data['candidates'][0]['content']['parts'][0]['text']
-            except KeyError:
-                raise Exception("Google API returned invalid format.")
+            try: return data['candidates'][0]['content']['parts'][0]['text']
+            except KeyError: raise Exception("Google API returned invalid structure.")
 
 # --- 🧠 PLACEMENT UI LOGIC ---
 class ForceClaimView(View):
@@ -116,9 +137,7 @@ class PlacementQuizView(View):
             self.add_item(btn)
 
     async def button_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user.id:
-            return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
-            
+        if interaction.user.id != self.user.id: return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
         self.stop()
         role = discord.utils.get(interaction.guild.roles, name=self.target_role)
         passed = (interaction.data['custom_id'] == self.q['answer'])
@@ -128,8 +147,7 @@ class PlacementQuizView(View):
                 for r in interaction.user.roles:
                     if r.name in ROLE_NAMES: await interaction.user.remove_roles(r)
             if role: await interaction.user.add_roles(role)
-            msg = f"🎉 **Correct!** You proved your skills. You are now an **{self.target_role}**!"
-            await interaction.response.edit_message(content=msg, embed=None, view=None)
+            await interaction.response.edit_message(content=f"🎉 **Correct!** You proved your skills. You are now an **{self.target_role}**!", embed=None, view=None)
         else:
             if self.is_changerole:
                 await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed.", embed=None, view=None)
@@ -153,8 +171,7 @@ class JLPTSelect(Select):
         super().__init__(placeholder="Select your target JLPT Level...", min_values=1, max_values=1, options=opts, custom_id="jlpt_dropdown")
 
     async def callback(self, interaction: discord.Interaction):
-        if has_main_role(interaction.user):
-            return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade.", ephemeral=True)
+        if has_main_role(interaction.user): return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade.", ephemeral=True)
             
         selected_role = self.values[0]
         level_short = selected_role.split(" ")[1] 
@@ -163,7 +180,6 @@ class JLPTSelect(Select):
         prompt = f"""Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
         
         try:
-            # Using DIRECT REST API
             raw_text = await generate_gemini_response(prompt)
             q = extract_json(raw_text)[0]
             embed = discord.Embed(title=f"🎌 {level_short} Placement Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
@@ -172,7 +188,7 @@ class JLPTSelect(Select):
             msg = await interaction.edit_original_response(content="", embed=embed, view=view)
             view.message = msg
         except Exception as e:
-            await interaction.edit_original_response(content=f"❌ Network/API Error. Please try again. ({e})")
+            await interaction.edit_original_response(content=f"❌ AI Initialization Error: {e}")
 
 class WelcomeView(View):
     def __init__(self): super().__init__(timeout=None)
@@ -193,7 +209,7 @@ class WelcomeView(View):
         view.add_item(JLPTSelect())
         await interaction.response.send_message("Awesome! Please select your target JLPT level below:", view=view, ephemeral=True)
 
-# --- 🤖 MAIN BOT CLASS & 20-Q QUIZ ---
+# --- 🤖 MAIN BOT CLASS & QUIZ ---
 class NihongoBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -253,7 +269,7 @@ class QuizView(View):
             await interaction.response.edit_message(embed=discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/20** in {time_taken}s.", color=discord.Color.green()), view=None)
 
     async def on_timeout(self):
-        try: await self.message.edit(content="⏳ **Time's up!** Attempt cancelled to prevent spam.", view=None, embed=None)
+        try: await self.message.edit(content="⏳ **Time's up!** Attempt cancelled.", view=None, embed=None)
         except: pass
 
 # --- ⌨️ COMMANDS ---
@@ -262,7 +278,7 @@ async def help_command(interaction: discord.Interaction):
     if "bot-commands" not in interaction.channel.name.lower(): return await interaction.response.send_message("❌ Use `#🤖・bot-commands`.", ephemeral=True)
     await interaction.response.send_message(embed=discord.Embed(title="🤖 Commands", description="🧠 `/quiz` - JLPT Mock Test\n⬆️ `/changerole` - Upgrade your Japanese level", color=0xffb6c1), ephemeral=True)
 
-@bot.tree.command(name="changerole", description="Upgrade your JLPT level by passing a Medium/Hard test.")
+@bot.tree.command(name="changerole", description="Upgrade your JLPT level.")
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
 async def changerole(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
     await interaction.response.defer(ephemeral=True)
@@ -270,19 +286,18 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     if any(r.name == target_level.value for r in interaction.user.roles): return await interaction.followup.send("❌ You already have this role!", ephemeral=True)
     
     lvl_short = target_level.value.split(" ")[1]
-    await interaction.followup.send(f"⏳ Generating a Medium-Hard upgrade test for {lvl_short}...", ephemeral=True)
+    await interaction.followup.send(f"⏳ Generating test for {lvl_short}...", ephemeral=True)
     prompt = f"""Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium to Hard. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
     try:
         raw_text = await generate_gemini_response(prompt)
         q = extract_json(raw_text)[0]
         embed = discord.Embed(title=f"🎌 {lvl_short} Upgrade Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0xe67e22)
-        embed.set_footer(text="Pass this to upgrade your role! You have 60 seconds.")
         view = PlacementQuizView(interaction.user, q, target_level.value, is_changerole=True)
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
-    except Exception as e: await interaction.edit_original_response(content=f"❌ Network/API Error. Please try again. ({e})")
+    except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
-@bot.tree.command(name="quiz", description="Take a 20-question JLPT mock test.")
+@bot.tree.command(name="quiz", description="Take a 20-question JLPT test.")
 async def quiz(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     user_level = next((r.name.replace("📍 ", "").strip() for r in interaction.user.roles if r.name in ROLE_NAMES), None)
@@ -297,6 +312,6 @@ async def quiz(interaction: discord.Interaction):
         view = QuizView(interaction.user, questions_data, user_level, time.time())
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
-    except Exception as e: await interaction.edit_original_response(content=f"❌ Network/API Error. Please try again. ({e})")
+    except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
 bot.run(os.environ.get("BOT_TOKEN"))
