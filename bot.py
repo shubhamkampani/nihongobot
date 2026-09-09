@@ -16,10 +16,8 @@ import google.generativeai as genai
 # --- 🌐 WEB SERVER ---
 app = Flask('')
 @app.route('/')
-def home():
-    return "Nihongo Bot is Live 24/7!"
-def run():
-    app.run(host='0.0.0.0', port=8000)
+def home(): return "Nihongo Bot is Live 24/7!"
+def run(): app.run(host='0.0.0.0', port=8000)
 Thread(target=run).start()
 
 # --- 🗄️ DATABASE & AI ---
@@ -35,68 +33,133 @@ except Exception as e:
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- 🌸 10 UNIQUE ROMAJI GREETINGS ---
+# --- 🎌 ROLE CONSTANTS ---
+ROLE_NAMES = ["📍 N5 Beginner", "📍 N4 Elementary", "📍 N3 Intermediate", "📍 N2 Pre-Advanced", "📍 N1 Advanced"]
 GREETINGS_LIST = [
-    "Irasshaimase! 🌸", 
-    "Konnichiwa! ✨", 
-    "Yokoso! 🎌", 
-    "Hajimemashite! ⛩️",
-    "Okaerinasai! 🏡", 
-    "Ohayou gozaimasu! 🌅", 
-    "Konbanwa! 🌙", 
-    "Yoroshiku onegaishimasu! 🤝",
-    "Kangei shimasu! 🎊",
-    "Nihongo no sekai e yōkoso! 🗾"
+    "Irasshaimase! 🌸", "Konnichiwa! ✨", "Yokoso! 🎌", "Hajimemashite! ⛩️",
+    "Okaerinasai! 🏡", "Ohayou gozaimasu! 🌅", "Konbanwa! 🌙", 
+    "Yoroshiku onegaishimasu! 🤝", "Kangei shimasu! 🎊", "Nihongo no sekai e yōkoso! 🗾"
 ]
 
-# --- 🎭 ROLE SELECTION UI ---
+def has_main_role(member):
+    return any(r.name in ROLE_NAMES or r.name == "Visitor" for r in member.roles)
+
+def get_fallback_role(current_role_name):
+    try:
+        idx = ROLE_NAMES.index(current_role_name)
+        return ROLE_NAMES[max(0, idx - 1)] # Returns N5 if N5 is selected, else one level down
+    except ValueError:
+        return ROLE_NAMES[0]
+
+# --- 🧠 PLACEMENT UI LOGIC ---
+class ForceClaimView(View):
+    def __init__(self, user, target_role_name, fallback_role_name):
+        super().__init__(timeout=120)
+        self.user, self.target_role, self.fallback_role = user, target_role_name, fallback_role_name
+
+    @discord.ui.button(label=f"Accept Recommended", style=discord.ButtonStyle.success)
+    async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        role = discord.utils.get(interaction.guild.roles, name=self.fallback_role)
+        if role: await interaction.user.add_roles(role)
+        await interaction.response.edit_message(content=f"✅ You accepted the recommendation. You are now an **{self.fallback_role}**!", view=None, embed=None)
+
+    @discord.ui.button(label="Force Keep Level", style=discord.ButtonStyle.danger)
+    async def btn_force(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        role = discord.utils.get(interaction.guild.roles, name=self.target_role)
+        if role: await interaction.user.add_roles(role)
+        await interaction.response.edit_message(content=f"✅ You chose to keep your selected level. You are now an **{self.target_role}**!", view=None, embed=None)
+
+class PlacementQuizView(View):
+    def __init__(self, user, question_data, target_role_name, is_changerole=False):
+        super().__init__(timeout=60)
+        self.user, self.q, self.target_role = user, question_data, target_role_name
+        self.is_changerole = is_changerole
+        
+        for label in ["A", "B", "C", "D"]:
+            btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
+            btn.callback = self.button_callback
+            self.add_item(btn)
+
+    async def button_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
+            
+        self.stop()
+        role = discord.utils.get(interaction.guild.roles, name=self.target_role)
+        passed = (interaction.data['custom_id'] == self.q['answer'])
+
+        if passed:
+            if self.is_changerole:
+                for r in interaction.user.roles:
+                    if r.name in ROLE_NAMES: await interaction.user.remove_roles(r)
+            if role: await interaction.user.add_roles(role)
+            msg = f"🎉 **Correct!** You proved your skills. You are now an **{self.target_role}**!"
+            await interaction.response.edit_message(content=msg, embed=None, view=None)
+        else:
+            if self.is_changerole:
+                await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed. Keep studying!", embed=None, view=None)
+            else:
+                fallback = get_fallback_role(self.target_role)
+                if fallback == self.target_role:
+                    if role: await interaction.user.add_roles(role)
+                    await interaction.response.edit_message(content=f"❌ Incorrect! But since you selected Beginner, you are now an **{self.target_role}**.", embed=None, view=None)
+                else:
+                    embed = discord.Embed(title="⚠️ Placement Test Failed", description=f"The correct answer was **{self.q['answer']}**.\n\nWe recommend starting at **{fallback}**, but you can choose to force-claim your selected **{self.target_role}** role.", color=discord.Color.orange())
+                    await interaction.response.edit_message(content="", embed=embed, view=ForceClaimView(self.user, self.target_role, fallback))
+
+    async def on_timeout(self):
+        try: await self.message.edit(content="⏳ **Time's up!** Please select your role again to retry the test.", view=None, embed=None)
+        except: pass
+
+# --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
     def __init__(self):
-        options = [
-            discord.SelectOption(label="N5 Beginner", emoji="📍"),
-            discord.SelectOption(label="N4 Elementary", emoji="📍"),
-            discord.SelectOption(label="N3 Intermediate", emoji="📍"),
-            discord.SelectOption(label="N2 Pre-Advanced", emoji="📍"),
-            discord.SelectOption(label="N1 Advanced", emoji="📍")
-        ]
-        # Yahan maine custom_id="jlpt_dropdown" add kar diya hai
-        super().__init__(placeholder="Select your target JLPT Level...", min_values=1, max_values=1, options=options, custom_id="jlpt_dropdown")
-
+        opts = [discord.SelectOption(label=r.split(" ", 1)[1], emoji="📍", value=r) for r in ROLE_NAMES]
+        super().__init__(placeholder="Select your target JLPT Level...", min_values=1, max_values=1, options=opts, custom_id="jlpt_dropdown")
 
     async def callback(self, interaction: discord.Interaction):
-        selected_level = self.values[0]
-        role_name = f"📍 {selected_level}"
-        role = discord.utils.get(interaction.guild.roles, name=role_name)
+        if has_main_role(interaction.user):
+            return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` in the bot commands channel if you wish to upgrade.", ephemeral=True)
+            
+        selected_role = self.values[0]
+        level_short = selected_role.split(" ")[1] 
+        await interaction.response.send_message(f"⏳ Generating a 1-question placement test for {level_short}...", ephemeral=True)
         
-        if role:
-            await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"✅ You are now an {selected_level}! Use `/quiz` in the commands channel to test your skills.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Role not found in server.", ephemeral=True)
-
-class JLPTView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(JLPTSelect())
+        prompt = f"""Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
+        
+        try:
+            raw_text = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
+            q = json.loads(raw_text)[0]
+            embed = discord.Embed(title=f"🎌 {level_short} Placement Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            embed.set_footer(text="⏳ You have 60 seconds to answer.")
+            view = PlacementQuizView(interaction.user, q, selected_role)
+            msg = await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = msg
+        except Exception:
+            await interaction.edit_original_response(content=f"❌ AI Error generating placement test. Please try again.")
 
 class WelcomeView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
+    def __init__(self): super().__init__(timeout=None)
 
     @discord.ui.button(label="📸 Visitor", style=discord.ButtonStyle.secondary, custom_id="role_visitor")
     async def visitor_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if has_main_role(interaction.user): return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade.", ephemeral=True)
         role = discord.utils.get(interaction.guild.roles, name="Visitor") 
         if role:
             await interaction.user.add_roles(role)
             await interaction.response.send_message("✅ You are now a Visitor! Enjoy exploring.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Visitor role not found. Ask Admin to create it.", ephemeral=True)
+        else: await interaction.response.send_message("❌ Visitor role not found.", ephemeral=True)
 
     @discord.ui.button(label="🎌 JP Learner", style=discord.ButtonStyle.primary, custom_id="role_learner")
     async def learner_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Awesome! Please select your target JLPT level below:", view=JLPTView(), ephemeral=True)
+        if has_main_role(interaction.user): return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade.", ephemeral=True)
+        view = View(timeout=None)
+        view.add_item(JLPTSelect())
+        await interaction.response.send_message("Awesome! Please select your target JLPT level below:", view=view, ephemeral=True)
 
-# --- 🤖 MAIN BOT CLASS ---
+# --- 🤖 MAIN BOT CLASS & 20-Q QUIZ ---
 class NihongoBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -107,31 +170,22 @@ class NihongoBot(commands.Bot):
     async def setup_hook(self):
         self.weekly_leaderboard_loop.start()
         self.add_view(WelcomeView())
-        self.add_view(JLPTView())
+        view = View(timeout=None)
+        view.add_item(JLPTSelect())
+        self.add_view(view)
         await self.tree.sync()
         print("✅ Commands Synced & Tasks Started.")
 
     async def on_member_join(self, member: discord.Member):
-        # specifically targets your custom channel name
         welcome_ch = discord.utils.find(lambda c: "welcome" in c.name.lower(), member.guild.channels)
         if welcome_ch:
-            greeting = random.choice(GREETINGS_LIST)
-            text = f"{greeting} Welcome to the community, {member.mention}!"
-            
-            embed = discord.Embed(
-                title="🌸 Choose Your Path",
-                description="To get started, please select your role below:\n\n📸 **Visitor:** I'm just exploring.\n🎌 **JP Learner:** I am studying Japanese.",
-                color=0xffb6c1
-            )
-            try:
-                await welcome_ch.send(content=text, embed=embed, view=WelcomeView())
-            except Exception as e:
-                print(f"Welcome Msg Error: {e}")
+            embed = discord.Embed(title="🌸 Choose Your Path", description="To get started, please select your role below:\n\n📸 **Visitor:** I'm just exploring.\n🎌 **JP Learner:** I am studying Japanese.", color=0xffb6c1)
+            try: await welcome_ch.send(content=f"{random.choice(GREETINGS_LIST)} Welcome to the community, {member.mention}!", embed=embed, view=WelcomeView())
+            except Exception: pass
 
     @tasks.loop(minutes=1)
     async def weekly_leaderboard_loop(self):
-        jst = pytz.timezone('Asia/Tokyo')
-        now_jst = datetime.now(jst)
+        now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
         if now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 0:
             if not getattr(self, 'weekly_reset_done', False):
                 self.weekly_reset_done = True
@@ -141,24 +195,18 @@ class NihongoBot(commands.Bot):
 
 bot = NihongoBot()
 
-# --- 🎮 QUIZ UI ENGINE ---
 class QuizView(View):
     def __init__(self, user, questions, level, start_time):
         super().__init__(timeout=60) 
         self.user, self.questions, self.level, self.current_idx, self.score, self.start_time = user, questions, level, 0, 0, start_time
-        
         for label in ["A", "B", "C", "D"]:
             btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
             btn.callback = self.button_callback
             self.add_item(btn)
 
     async def button_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user.id:
-            return await interaction.response.send_message("❌ Not your quiz!", ephemeral=True)
-            
-        if interaction.data['custom_id'] == self.questions[self.current_idx]['answer']:
-            self.score += 1
-            
+        if interaction.user.id != self.user.id: return await interaction.response.send_message("❌ Not your quiz!", ephemeral=True)
+        if interaction.data['custom_id'] == self.questions[self.current_idx]['answer']: self.score += 1
         self.current_idx += 1
         if self.current_idx < 20:
             q = self.questions[self.current_idx]
@@ -177,31 +225,44 @@ class QuizView(View):
 # --- ⌨️ COMMANDS ---
 @bot.tree.command(name="help", description="Shows bot commands.")
 async def help_command(interaction: discord.Interaction):
-    if "bot-commands" not in interaction.channel.name.lower():
-        return await interaction.response.send_message("❌ Use `#🤖・bot-commands`.", ephemeral=True)
-    await interaction.response.send_message(embed=discord.Embed(title="🤖 Commands", description="🧠 `/quiz` - JLPT Mock Test", color=0xffb6c1), ephemeral=True)
+    if "bot-commands" not in interaction.channel.name.lower(): return await interaction.response.send_message("❌ Use `#🤖・bot-commands`.", ephemeral=True)
+    await interaction.response.send_message(embed=discord.Embed(title="🤖 Commands", description="🧠 `/quiz` - JLPT Mock Test\n⬆️ `/changerole` - Upgrade your Japanese level", color=0xffb6c1), ephemeral=True)
+
+@bot.tree.command(name="changerole", description="Upgrade your JLPT level by passing a Medium/Hard test.")
+@app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
+async def changerole(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=True)
+    if "bot-commands" not in interaction.channel.name.lower(): return await interaction.followup.send("❌ Use `#🤖・bot-commands`.", ephemeral=True)
+    if any(r.name == target_level.value for r in interaction.user.roles): return await interaction.followup.send("❌ You already have this role!", ephemeral=True)
+    
+    lvl_short = target_level.value.split(" ")[1]
+    await interaction.followup.send(f"⏳ Generating a Medium-Hard upgrade test for {lvl_short}...", ephemeral=True)
+    prompt = f"""Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium to Hard. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
+    try:
+        raw_text = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
+        q = json.loads(raw_text)[0]
+        embed = discord.Embed(title=f"🎌 {lvl_short} Upgrade Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0xe67e22)
+        embed.set_footer(text="Pass this to upgrade your role! You have 60 seconds.")
+        view = PlacementQuizView(interaction.user, q, target_level.value, is_changerole=True)
+        msg = await interaction.edit_original_response(content="", embed=embed, view=view)
+        view.message = msg 
+    except Exception: await interaction.edit_original_response(content="❌ AI Error. Please try again.")
 
 @bot.tree.command(name="quiz", description="Take a 20-question JLPT mock test.")
 async def quiz(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    user_level = next((r.name.replace("📍 ", "").strip() for r in interaction.user.roles if r.name in ["📍 N5", "📍 N4", "📍 N3", "📍 N2", "📍 N1"]), None)
-            
-    if not user_level:
-        return await interaction.followup.send("❌ Get an N5-N1 role first.", ephemeral=True)
-        
+    user_level = next((r.name.replace("📍 ", "").strip() for r in interaction.user.roles if r.name in ROLE_NAMES), None)
+    if not user_level: return await interaction.followup.send("❌ Get a N5-N1 role first.", ephemeral=True)
     await interaction.followup.send(f"⏳ Generating 20 {user_level} questions...", ephemeral=True)
     prompt = f"""Generate 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
-    
     try:
         raw_text = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
         questions_data = json.loads(raw_text)
-        
         q = questions_data[0]
         embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/20)", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
         view = QuizView(interaction.user, questions_data, user_level, time.time())
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
-    except Exception as e:
-        await interaction.edit_original_response(content=f"❌ AI Error. Please try again.")
+    except Exception: await interaction.edit_original_response(content=f"❌ AI Error. Please try again.")
 
 bot.run(os.environ.get("BOT_TOKEN"))
