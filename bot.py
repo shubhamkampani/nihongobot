@@ -32,24 +32,7 @@ except Exception as e:
     print(f"❌ MongoDB Error: {e}")
 
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-
-# SAFE MODEL LOADING: Checks available models and picks the best stable one automatically
-try:
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    # Priority: 1.5-flash -> 1.5-pro -> basic gemini-pro
-    if 'models/gemini-1.5-flash' in available_models:
-        model_name = 'gemini-1.5-flash'
-    elif 'models/gemini-1.5-pro' in available_models:
-        model_name = 'gemini-1.5-pro'
-    else:
-        model_name = 'gemini-pro'
-        
-    model = genai.GenerativeModel(model_name)
-    print(f"✅ AI Connected to stable model: {model_name}")
-except Exception as e:
-    # Absolute fallback if list_models fails
-    model = genai.GenerativeModel('gemini-pro')
-    print(f"⚠️ AI connected via fallback model. ({e})")
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- 🎌 ROLE CONSTANTS ---
 ROLE_NAMES = ["📍 N5 Beginner", "📍 N4 Elementary", "📍 N3 Intermediate", "📍 N2 Pre-Advanced", "📍 N1 Advanced"]
