@@ -93,7 +93,7 @@ async def generate_gemini_response(prompt):
     
         payload = {
             "model": "openai/gpt-oss-20b", 
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": "prompt"}],
             "temperature": 0.5,
             "max_tokens": 6000  # <--- Added this to allow full 20 questions without cutting off
         }
