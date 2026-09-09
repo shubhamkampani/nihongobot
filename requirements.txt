@@ -1,2 +1,5 @@
 discord.py
 Flask
+pymongo
+google-generativeai
+pytz
