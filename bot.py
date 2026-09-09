@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 import pytz
 from pymongo import MongoClient
-import google.generativeai as genai
+import aiohttp
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -21,7 +21,7 @@ def home(): return "Nihongo Bot is Live 24/7!"
 def run(): app.run(host='0.0.0.0', port=8000)
 Thread(target=run).start()
 
-# --- 🗄️ DATABASE & AI ---
+# --- 🗄️ DATABASE SETUP ---
 MONGO_URI = os.environ.get("MONGO_URI")
 try:
     cluster = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
@@ -30,9 +30,6 @@ try:
     print("✅ MongoDB Connected!")
 except Exception as e:
     print(f"❌ MongoDB Error: {e}")
-
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- 🎌 ROLE CONSTANTS ---
 ROLE_NAMES = ["📍 N5 Beginner", "📍 N4 Elementary", "📍 N3 Intermediate", "📍 N2 Pre-Advanced", "📍 N1 Advanced"]
@@ -53,13 +50,36 @@ def get_fallback_role(current_role_name):
         return ROLE_NAMES[0]
 
 def extract_json(raw_text):
-    """Smart JSON extractor to bypass markdown tags from Gemini AI"""
+    """Smart JSON extractor to bypass markdown tags"""
     match = re.search(r'\[\s*\{.*?\}\s*\]', raw_text, re.DOTALL)
     if match: return json.loads(match.group(0))
     match_dict = re.search(r'\{.*?\}', raw_text, re.DOTALL)
     if match_dict: return [json.loads(match_dict.group(0))]
     cleaned = raw_text.strip().replace("```json", "").replace("```JSON", "").replace("```", "").strip()
     return json.loads(cleaned)
+
+# --- 🧠 DIRECT GOOGLE REST API BYPASS (No Flaky SDK) ---
+async def generate_gemini_response(prompt):
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise Exception("API Key missing from Render Environment!")
+    
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}) as resp:
+            if resp.status != 200:
+                err_text = await resp.text()
+                raise Exception(f"HTTP {resp.status}: {err_text}") # Gives exact Google Error
+            
+            data = await resp.json()
+            try:
+                return data['candidates'][0]['content']['parts'][0]['text']
+            except KeyError:
+                raise Exception("Google API returned invalid format.")
 
 # --- 🧠 PLACEMENT UI LOGIC ---
 class ForceClaimView(View):
@@ -131,7 +151,7 @@ class JLPTSelect(Select):
 
     async def callback(self, interaction: discord.Interaction):
         if has_main_role(interaction.user):
-            return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` in the bot commands channel if you wish to upgrade.", ephemeral=True)
+            return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade.", ephemeral=True)
             
         selected_role = self.values[0]
         level_short = selected_role.split(" ")[1] 
@@ -140,16 +160,16 @@ class JLPTSelect(Select):
         prompt = f"""Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
         
         try:
-            # Using async call to prevent Discord timeout
-            response = await model.generate_content_async(prompt)
-            q = extract_json(response.text)[0]
+            # Using DIRECT REST API
+            raw_text = await generate_gemini_response(prompt)
+            q = extract_json(raw_text)[0]
             embed = discord.Embed(title=f"🎌 {level_short} Placement Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
             embed.set_footer(text="⏳ You have 60 seconds to answer.")
             view = PlacementQuizView(interaction.user, q, selected_role)
             msg = await interaction.edit_original_response(content="", embed=embed, view=view)
             view.message = msg
         except Exception as e:
-            await interaction.edit_original_response(content=f"❌ AI Error generating placement test. Please try again. ({e})")
+            await interaction.edit_original_response(content=f"❌ Network/API Error. Please try again. ({e})")
 
 class WelcomeView(View):
     def __init__(self): super().__init__(timeout=None)
@@ -250,14 +270,14 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     await interaction.followup.send(f"⏳ Generating a Medium-Hard upgrade test for {lvl_short}...", ephemeral=True)
     prompt = f"""Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium to Hard. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
     try:
-        response = await model.generate_content_async(prompt)
-        q = extract_json(response.text)[0]
+        raw_text = await generate_gemini_response(prompt)
+        q = extract_json(raw_text)[0]
         embed = discord.Embed(title=f"🎌 {lvl_short} Upgrade Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0xe67e22)
         embed.set_footer(text="Pass this to upgrade your role! You have 60 seconds.")
         view = PlacementQuizView(interaction.user, q, target_level.value, is_changerole=True)
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
-    except Exception as e: await interaction.edit_original_response(content=f"❌ AI Error. Please try again. ({e})")
+    except Exception as e: await interaction.edit_original_response(content=f"❌ Network/API Error. Please try again. ({e})")
 
 @bot.tree.command(name="quiz", description="Take a 20-question JLPT mock test.")
 async def quiz(interaction: discord.Interaction):
@@ -267,13 +287,13 @@ async def quiz(interaction: discord.Interaction):
     await interaction.followup.send(f"⏳ Generating 20 {user_level} questions...", ephemeral=True)
     prompt = f"""Generate 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
     try:
-        response = await model.generate_content_async(prompt)
-        questions_data = extract_json(response.text)
+        raw_text = await generate_gemini_response(prompt)
+        questions_data = extract_json(raw_text)
         q = questions_data[0]
         embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/20)", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
         view = QuizView(interaction.user, questions_data, user_level, time.time())
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
-    except Exception as e: await interaction.edit_original_response(content=f"❌ AI Error. Please try again. ({e})")
+    except Exception as e: await interaction.edit_original_response(content=f"❌ Network/API Error. Please try again. ({e})")
 
 bot.run(os.environ.get("BOT_TOKEN"))
