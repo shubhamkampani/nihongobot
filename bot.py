@@ -15,6 +15,8 @@ from pymongo import MongoClient
 import aiohttp
 import urllib.parse
 import ast
+import asyncio
+from kanjis import N5_KANJI, N4_KANJI, N3_KANJI, N2_KANJI, N1_KANJI
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -31,6 +33,7 @@ try:
     cluster.admin.command('ping')
     db = cluster["nihongo_db"]
     quiz_db = db["weekly_scores"]
+    kanji_db = db["kanji_tracker"]
     print("✅ MongoDB Connected!")
 except Exception as e:
     print(f"❌ MongoDB Error: {e}")
@@ -290,6 +293,7 @@ class NihongoBot(commands.Bot):
 
     async def setup_hook(self):
         self.weekly_leaderboard_loop.start()
+        self.daily_kanji_loop.start()
         self.add_view(WelcomeView())
         view = View(timeout=None)
         view.add_item(JLPTSelect())
@@ -369,6 +373,87 @@ class NihongoBot(commands.Bot):
                 
         elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 2:
             self.weekly_reset_done = False
+        @tasks.loop(minutes=1)
+    async def daily_kanji_loop(self):
+        now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+        
+        # Trigger at exactly 9:00 AM JST
+        if now_jst.hour == 9 and now_jst.minute == 0:
+            if not getattr(self, 'daily_kanji_done', False):
+                self.daily_kanji_done = True
+                await self.drop_kanjis_task()
+        elif now_jst.hour == 9 and now_jst.minute == 1:
+            self.daily_kanji_done = False
+
+    async def drop_kanjis_task(self):
+        # Format: (Level Name, Kanji List, Drop Count, Channel Name Keyword)
+        level_configs = [
+            ("N5", N5_KANJI, 1, "n5-daily-kanji"),
+            ("N4", N4_KANJI, 1, "n4-daily-kanji"),
+            ("N3", N3_KANJI, 1, "n3-daily-kanji"),
+            ("N2", N2_KANJI, 2, "n2-daily-kanji"),
+            ("N1", N1_KANJI, 3, "n1-daily-kanji")
+        ]
+
+        for guild in self.guilds:
+            for lvl_name, kanji_list, drop_count, ch_keyword in level_configs:
+                channel = discord.utils.find(lambda c: ch_keyword in c.name.lower(), guild.channels)
+                if not channel: 
+                    continue
+
+                # 1. Fetch current index from MongoDB
+                data = kanji_db.find_one({"level": lvl_name})
+                current_index = data["current_index"] if data else 0
+
+                # 2. Cycle Restart Logic (If syllabus is complete)
+                if current_index >= len(kanji_list):
+                    current_index = 0
+                
+                # 3. Fetch Revision Kanjis (Yesterday's Kanjis)
+                revision_kanjis = []
+                if current_index >= drop_count:
+                    revision_kanjis = kanji_list[current_index - drop_count : current_index]
+                elif current_index > 0:
+                    revision_kanjis = kanji_list[0 : current_index]
+
+                # 4. Fetch New Kanjis for Today
+                new_kanjis = kanji_list[current_index : current_index + drop_count]
+                
+                # Edge case if list runs out right at the end
+                if not new_kanjis: 
+                    current_index = 0
+                    new_kanjis = kanji_list[current_index : current_index + drop_count]
+
+                # 5. Update MongoDB index for tomorrow
+                next_index = current_index + len(new_kanjis)
+                kanji_db.update_one({"level": lvl_name}, {"$set": {"current_index": next_index}}, upsert=True)
+
+                # 6. Prompt Gemini for explanation
+                kanji_str = ", ".join(new_kanjis)
+                prompt = f"""You are an expert Japanese Sensei. Explain the following {len(new_kanjis)} Kanji(s): {kanji_str}.
+                For EACH Kanji, strictly provide:
+                1. Meaning
+                2. Onyomi & Kunyomi (with Romaji)
+                3. One example of each kanji in a word with Onyomi & Kunyomi pronounciation being used (with romaji).
+                3. A short visual memory trick to remember the Kanji shape. Should be logical and naturally present in surroundings.
+                4. A short pronunciation trick to remember the reading. Should be logical and naturally present.
+                Format the entire response beautifully in Discord Markdown using headings, bold text, and bullet points. Keep the script entirely in English. Do NOT use JSON."""
+                
+                try:
+                    explanation = await generate_gemini_response(prompt)
+                    
+                    # 7. Construct and send the Discord Message
+                    rev_text = f"**🔄 Yesterday's Revision:** {', '.join(revision_kanjis)}\n\n" if revision_kanjis else ""
+                    header = f"## ㊗️ {lvl_name} Daily Kanji Drop!\n{rev_text}"
+                    
+                    # Sending header and AI explanation
+                    await channel.send(f"{header}{explanation}")
+
+                except Exception as e:
+                    print(f"❌ Error dropping {lvl_name} Kanji: {e}")
+                
+                # Sleep for 5 seconds between each level to prevent API/Discord Rate Limits
+                await asyncio.sleep(5)        
 
 bot = NihongoBot()
 
