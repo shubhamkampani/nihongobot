@@ -373,7 +373,8 @@ class NihongoBot(commands.Bot):
                 
         elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 2:
             self.weekly_reset_done = False
-        @tasks.loop(minutes=1)
+
+    @tasks.loop(minutes=1)
     async def daily_kanji_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
         
