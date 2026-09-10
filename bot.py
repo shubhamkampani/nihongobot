@@ -95,8 +95,8 @@ async def generate_gemini_response(prompt):
         raise Exception("GEMINI_API_KEY missing from Environment!")
     
     clean_key = api_key.strip()
-    # Using the latest Gemini 3.8 Flash model endpoint
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={clean_key}"
+    # Using the latest Gemini 3.5 Flash model endpoint
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={clean_key}"
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
