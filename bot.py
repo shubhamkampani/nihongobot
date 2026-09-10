@@ -13,6 +13,7 @@ from datetime import datetime
 import pytz
 from pymongo import MongoClient
 import aiohttp
+import urllib.parse
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -22,8 +23,6 @@ def run(): app.run(host='0.0.0.0', port=8000)
 Thread(target=run).start()
 
 # --- 🗄️ DATABASE SETUP ---
-import urllib.parse
-
 MONGO_URI = os.environ.get("MONGO_URI")
 try:
     # URL encoded password parser ensures special characters don't break the URI
@@ -59,10 +58,8 @@ def get_fallback_role(current_role_name):
 
 def extract_json(raw_text):
     """Ultra-smart JSON extractor and auto-repair for flaky AI outputs"""
-    # 1. First, strip all markdown blocks and whitespace
     cleaned = raw_text.strip().replace("```json", "").replace("```JSON", "").replace("```", "").strip()
     
-    # 2. Try direct extraction
     match = re.search(r'\[\s*\{.*?\}\s*\]', cleaned, re.DOTALL)
     match_dict = re.search(r'\{.*?\}', cleaned, re.DOTALL)
     
@@ -71,31 +68,28 @@ def extract_json(raw_text):
     elif match_dict: json_string = "[" + match_dict.group(0) + "]"
     else: json_string = cleaned
     
-    # 3. Clean trailing commas (a very common AI hallucination causing JSONDecodeError)
     json_string = re.sub(r',\s*([\]}])', r'\1', json_string)
     
-    # 4. Try parsing it safely
     try:
         return json.loads(json_string)
     except json.JSONDecodeError as e:
         print(f"⚠️ JSON Decode Error details: {e}\nRaw Output was:\n{json_string}")
-        # Absolute fallback: Return a safe dummy question if the AI completely broke the JSON
         return [{"question": "AI Formatting Error: Please try clicking again.", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
-# --- 🧠 DIRECT GROQ REST API (SUPERFAST & ZERO 404 ERRORS) ---
+# --- 🧠 DIRECT GROQ REST API ---
 async def generate_gemini_response(prompt):
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key: 
         raise Exception("GROQ_API_KEY missing from Render Environment!")
     
     clean_key = api_key.strip()
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
     
     payload = {
         "model": "openai/gpt-oss-20b", 
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5,
-        "max_tokens": 6000  # <--- Added this to allow full 20 questions without cutting off
+        "max_tokens": 6000  # <--- Allows 20 questions without cutting off
     }
 
     headers = {
@@ -115,7 +109,7 @@ async def generate_gemini_response(prompt):
             except KeyError: 
                 raise Exception("API returned invalid structure.")
 
-# --- 🧠 PLACEMENT UI LOGIC ---
+# --- 🧠 PLACEMENT & QUIZ UI LOGIC ---
 class ForceClaimView(View):
     def __init__(self, user, target_role_name, fallback_role_name):
         super().__init__(timeout=120)
@@ -135,6 +129,45 @@ class ForceClaimView(View):
         if role: await interaction.user.add_roles(role)
         await interaction.response.edit_message(content=f"✅ You chose to keep your selected level. You are now an **{self.target_role}**!", view=None, embed=None)
 
+class PlacementQuizView(View):
+    def __init__(self, user, question_data, target_role_name, is_changerole=False):
+        super().__init__(timeout=60)
+        self.user, self.q, self.target_role = user, question_data, target_role_name
+        self.is_changerole = is_changerole
+        
+        for label in ["A", "B", "C", "D"]:
+            btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
+            btn.callback = self.button_callback
+            self.add_item(btn)
+
+    async def button_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user.id: return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
+        self.stop()
+        role = discord.utils.get(interaction.guild.roles, name=self.target_role)
+        passed = (interaction.data['custom_id'] == self.q['answer'])
+
+        if passed:
+            if self.is_changerole:
+                for r in interaction.user.roles:
+                    if r.name in ROLE_NAMES: await interaction.user.remove_roles(r)
+            if role: await interaction.user.add_roles(role)
+            await interaction.response.edit_message(content=f"🎉 **Correct!** You proved your skills. You are now an **{self.target_role}**!", embed=None, view=None)
+        else:
+            if self.is_changerole:
+                await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed.", embed=None, view=None)
+            else:
+                fallback = get_fallback_role(self.target_role)
+                if fallback == self.target_role:
+                    if role: await interaction.user.add_roles(role)
+                    await interaction.response.edit_message(content=f"❌ Incorrect! But since you selected Beginner, you are now an **{self.target_role}**.", embed=None, view=None)
+                else:
+                    embed = discord.Embed(title="⚠️ Placement Test Failed", description=f"The correct answer was **{self.q['answer']}**.\n\nWe recommend starting at **{fallback}**, but you can choose to force-claim your selected **{self.target_role}** role.", color=discord.Color.orange())
+                    await interaction.response.edit_message(content="", embed=embed, view=ForceClaimView(self.user, self.target_role, fallback))
+
+    async def on_timeout(self):
+        try: await self.message.edit(content="⏳ **Time's up!** Please select your role again to retry the test.", view=None, embed=None)
+        except: pass
+
 class QuizView(View):
     def __init__(self, user, questions, level, start_time):
         super().__init__(timeout=60) 
@@ -144,7 +177,7 @@ class QuizView(View):
         self.current_idx = 0
         self.score = 0
         self.start_time = start_time
-        self.total_q = len(questions) # Smartly counts exactly how many questions exist
+        self.total_q = len(questions) 
         
         for label in ["A", "B", "C", "D"]:
             btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
@@ -219,7 +252,7 @@ class WelcomeView(View):
         view.add_item(JLPTSelect())
         await interaction.response.send_message("Awesome! Please select your target JLPT level below:", view=view, ephemeral=True)
 
-# --- 🤖 MAIN BOT CLASS & QUIZ ---
+# --- 🤖 MAIN BOT CLASS & BACKGROUND TASKS ---
 class NihongoBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -246,47 +279,76 @@ class NihongoBot(commands.Bot):
     @tasks.loop(minutes=1)
     async def weekly_leaderboard_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+        
+        # --- 1. MORNING HYPE ANNOUNCEMENT (Sunday 10:00 AM JST) ---
+        if now_jst.weekday() == 6 and now_jst.hour == 10 and now_jst.minute == 0:
+            if not getattr(self, 'morning_hype_done', False):
+                self.morning_hype_done = True
+                for guild in self.guilds:
+                    for role_name in ROLE_NAMES:
+                        level_short = role_name.split(" ")[1].lower() 
+                        channel = discord.utils.find(lambda c: f"{level_short}-leaderboard" in c.name.lower(), guild.channels)
+                        role = discord.utils.get(guild.roles, name=role_name)
+                        
+                        if channel and role:
+                            hype_msg = (
+                                f"🔔 **Attention {role.mention}!**\n\n"
+                                f"Aaj raat **10:00 PM (Japan Time)** ko is week ke results announce hone wale hain! 🏆\n"
+                                f"Buckle up and give your best! Top #1 pe aane walo ko exclusive server perks aur ultimate bragging rights milenge. "
+                                f"Take your mock tests using `/quiz` now to climb the ranks! 🎌✨"
+                            )
+                            try: await channel.send(hype_msg)
+                            except Exception: pass
+                                
+        elif now_jst.weekday() == 6 and now_jst.hour == 10 and now_jst.minute == 1:
+            self.morning_hype_done = False
+
+        # --- 2. NIGHTLY AUTO-ANNOUNCEMENT (Sunday 10:00 PM JST) ---
         if now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 0:
+            if not getattr(self, 'night_announce_done', False):
+                self.night_announce_done = True
+                
+                for guild in self.guilds:
+                    for role_name in ROLE_NAMES:
+                        level_short = role_name.split(" ")[1].lower()
+                        channel = discord.utils.find(lambda c: f"{level_short}-leaderboard" in c.name.lower(), guild.channels)
+                        role = discord.utils.get(guild.roles, name=role_name)
+                        
+                        if channel and role:
+                            top_scorers = quiz_db.find({"level": role_name}).sort([("score", -1), ("time_taken", 1)]).limit(3)
+                            scorers_list = list(top_scorers)
+                            
+                            if scorers_list:
+                                embed = discord.Embed(title=f"🏆 Weekly Leaderboard: {role_name}", color=0xf1c40f)
+                                medals = ["🥇", "🥈", "🥉"]
+                                for idx, user_data in enumerate(scorers_list):
+                                    embed.add_field(
+                                        name=f"{medals[idx]} Rank #{idx + 1}", 
+                                        value=f"<@{user_data['_id']}> - **Score: {user_data['score']}/20** (Time: {user_data.get('time_taken', 'N/A')}s)", 
+                                        inline=False
+                                    )
+                                try: await channel.send(content=f"🎉 **THE RESULTS ARE IN!** {role.mention}", embed=embed)
+                                except Exception: pass
+                                
+        elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 1:
+            self.night_announce_done = False
+            
+            # --- 3. DATABASE PURGE EXACTLY AT 10:01 PM JST ---
             if not getattr(self, 'weekly_reset_done', False):
                 self.weekly_reset_done = True
-                quiz_db.delete_many({})
-        elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 1:
+                quiz_db.delete_many({}) 
+                print("✅ 10:01 PM JST: All weekly leaderboard data wiped to save memory.")
+                
+        elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 2:
             self.weekly_reset_done = False
 
 bot = NihongoBot()
-
-class QuizView(View):
-    def __init__(self, user, questions, level, start_time):
-        super().__init__(timeout=60) 
-        self.user, self.questions, self.level, self.current_idx, self.score, self.start_time = user, questions, level, 0, 0, start_time
-        for label in ["A", "B", "C", "D"]:
-            btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
-            btn.callback = self.button_callback
-            self.add_item(btn)
-
-    async def button_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user.id: return await interaction.response.send_message("❌ Not your quiz!", ephemeral=True)
-        if interaction.data['custom_id'] == self.questions[self.current_idx]['answer']: self.score += 1
-        self.current_idx += 1
-        if self.current_idx < 20:
-            q = self.questions[self.current_idx]
-            embed = discord.Embed(title=f"🎌 {self.level} Mock Test ({self.current_idx + 1}/20)", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            self.stop()
-            time_taken = round(time.time() - self.start_time)
-            quiz_db.update_one({"_id": self.user.id}, {"$set": {"level": self.level, "score": self.score, "time_taken": time_taken}}, upsert=True)
-            await interaction.response.edit_message(embed=discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/20** in {time_taken}s.", color=discord.Color.green()), view=None)
-
-    async def on_timeout(self):
-        try: await self.message.edit(content="⏳ **Time's up!** Attempt cancelled.", view=None, embed=None)
-        except: pass
 
 # --- ⌨️ COMMANDS ---
 @bot.tree.command(name="help", description="Shows bot commands.")
 async def help_command(interaction: discord.Interaction):
     if "bot-commands" not in interaction.channel.name.lower(): return await interaction.response.send_message("❌ Use `#🤖・bot-commands`.", ephemeral=True)
-    await interaction.response.send_message(embed=discord.Embed(title="🤖 Commands", description="🧠 `/quiz` - JLPT Mock Test\n⬆️ `/changerole` - Upgrade your Japanese level", color=0xffb6c1), ephemeral=True)
+    await interaction.response.send_message(embed=discord.Embed(title="🤖 Commands", description="🧠 `/quiz` - JLPT Mock Test\n⬆️ `/changerole` - Upgrade your Japanese level\n🏆 `/leaderboardannounce` - [Admin] Announce results manually", color=0xffb6c1), ephemeral=True)
 
 @bot.tree.command(name="changerole", description="Upgrade your JLPT level.")
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
@@ -307,7 +369,7 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
         view.message = msg 
     except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
-@bot.tree.command(name="quiz", description="Take a 20-question JLPT test.")
+@bot.tree.command(name="quiz", description="Take a JLPT test.")
 async def quiz(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     user_level = next((r.name.replace("📍 ", "").strip() for r in interaction.user.roles if r.name in ROLE_NAMES), None)
@@ -318,10 +380,55 @@ async def quiz(interaction: discord.Interaction):
         raw_text = await generate_gemini_response(prompt)
         questions_data = extract_json(raw_text)
         q = questions_data[0]
-        embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/20)", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+        embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
         view = QuizView(interaction.user, questions_data, user_level, time.time())
         msg = await interaction.edit_original_response(content="", embed=embed, view=view)
         view.message = msg 
     except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
+
+@bot.tree.command(name="leaderboardannounce", description="[Admin Only] Manually announce leaderboard & reset data for a specific level.")
+@app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
+async def leaderboard_announce(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
+    await interaction.response.defer()
+    
+    # 1. Permission Check (Senior Admin or Founder)
+    has_permission = any(role.name in ["Senior Admin", "Founder"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied: You need `Senior Admin` or `Founder` role to use this.", ephemeral=True)
+    
+    level_full_name = target_level.value
+    level_short = level_full_name.split(" ")[1].lower()
+    
+    # 2. Fetch Top Data from MongoDB
+    top_scorers = quiz_db.find({"level": level_full_name}).sort([("score", -1), ("time_taken", 1)]).limit(3)
+    scorers_list = list(top_scorers)
+    
+    channel = discord.utils.find(lambda c: f"{level_short}-leaderboard" in c.name.lower(), interaction.guild.channels)
+    
+    if not channel:
+        return await interaction.followup.send(f"❌ Could not find a channel named `#{level_short}-leaderboard`.", ephemeral=True)
+    
+    if not scorers_list:
+        await interaction.followup.send(f"⚠️ No data found for {level_full_name} this week.", ephemeral=True)
+        return
+        
+    # 3. Create the Embed for Announcement
+    embed = discord.Embed(title=f"🏆 Weekly Leaderboard: {level_full_name}", color=0xf1c40f)
+    medals = ["🥇", "🥈", "🥉"]
+    for idx, user_data in enumerate(scorers_list):
+        embed.add_field(
+            name=f"{medals[idx]} Rank #{idx + 1}", 
+            value=f"<@{user_data['_id']}> - **Score: {user_data['score']}/20** (Time: {user_data.get('time_taken', 'N/A')}s)", 
+            inline=False
+        )
+    
+    # 4. Announce it in the specific channel
+    role = discord.utils.get(interaction.guild.roles, name=level_full_name)
+    await channel.send(content=f"🎉 **MANUAL ANNOUNCEMENT** {role.mention if role else ''}", embed=embed)
+    
+    # 5. Smart Wipe: Delete ONLY this level's data to start fresh immediately
+    quiz_db.delete_many({"level": level_full_name})
+    
+    await interaction.followup.send(f"✅ Successfully announced for **{level_full_name}** in {channel.mention}. The database for this level has been wiped and is ready for fresh records.", ephemeral=True)
 
 bot.run(os.environ.get("BOT_TOKEN"))
