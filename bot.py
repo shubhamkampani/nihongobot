@@ -9,7 +9,7 @@ import random
 from threading import Thread
 from flask import Flask
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from pymongo import MongoClient
 import aiohttp
@@ -272,6 +272,55 @@ class StoryReaderView(View):
     async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_analysis(interaction, "vocab")
 
+class FreemiumStoryView(View):
+    def __init__(self, level, story_content):
+        super().__init__(timeout=None) 
+        self.level = level
+        self.story_content = story_content
+
+    async def check_premium(self, interaction: discord.Interaction):
+        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+        if not has_pro:
+            embed = discord.Embed(
+                title="🔒 Premium Feature Locked", 
+                description="Oops! Grammar and Vocab analysis are exclusively available for our **金 Pro Learners 金**.\n\nUnlock the full potential of your Japanese journey with unlimited personalized AI stories, deep grammar analysis, and much more! Upgrade today to access this and other pro tools. ✨", 
+                color=0xf1c40f
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return False
+        return True
+
+    async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
+        await interaction.response.defer(ephemeral=True)
+        prompts = {
+            "translate": f"Translate this Japanese story to English naturally:\n\n{self.story_content}",
+            "grammar": f"Analyze the key JLPT {self.level} grammar points used in this story. Explain them simply:\n\n{self.story_content}",
+            "vocab": f"Extract the key JLPT {self.level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{self.story_content}"
+        }
+        try:
+            response_text = await generate_gemini_response(prompts[task_type])
+            embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x2ecc71)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Analysis failed: {e}", ephemeral=True)
+
+    @discord.ui.button(label="🇬🇧 Translate (Free)", style=discord.ButtonStyle.primary)
+    async def btn_translate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Free for everyone, directly handles analysis
+        await self.handle_analysis(interaction, "translate")
+
+    @discord.ui.button(label="🧠 Analyze Grammar (Pro)", style=discord.ButtonStyle.success)
+    async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Checks for Pro role first
+        if await self.check_premium(interaction):
+            await self.handle_analysis(interaction, "grammar")
+
+    @discord.ui.button(label="📖 Extract Vocab (Pro)", style=discord.ButtonStyle.secondary)
+    async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Checks for Pro role first
+        if await self.check_premium(interaction):
+            await self.handle_analysis(interaction, "vocab")
+
 # --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
     def __init__(self):
@@ -336,6 +385,7 @@ class NihongoBot(commands.Bot):
     async def setup_hook(self):
         self.weekly_leaderboard_loop.start()
         self.daily_kanji_loop.start()
+        self.freemium_dokkai_loop.start()
         self.add_view(WelcomeView())
         view = View(timeout=None)
         view.add_item(JLPTSelect())
@@ -496,7 +546,81 @@ class NihongoBot(commands.Bot):
                     print(f"❌ Error dropping {lvl_name} Kanji: {e}")
                 
                 # Sleep for 5 seconds between each level to prevent API/Discord Rate Limits
-                await asyncio.sleep(5)        
+                await asyncio.sleep(5)
+
+    @tasks.loop(minutes=1)
+    async def freemium_dokkai_loop(self):
+        now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+        
+        # Initialize next drop time if it doesn't exist
+        if not hasattr(self, 'next_dokkai_drop'):
+            random_hour = random.randint(10, 20) # Random hour between 10 AM and 8 PM
+            random_minute = random.randint(0, 59)
+            self.next_dokkai_drop = now_jst.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
+            
+            # If the random time today has already passed, schedule for tomorrow
+            if now_jst >= self.next_dokkai_drop:
+                tomorrow = now_jst + timedelta(days=1)
+                self.next_dokkai_drop = tomorrow.replace(hour=random.randint(10, 20), minute=random.randint(0, 59))
+
+        # Check if it's time to drop
+        if now_jst >= self.next_dokkai_drop:
+            await self.drop_freemium_dokkai_task()
+            
+            # Setup the next random drop for tomorrow
+            tomorrow = now_jst + timedelta(days=1)
+            random_hour = random.randint(10, 20)
+            random_minute = random.randint(0, 59)
+            self.next_dokkai_drop = tomorrow.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
+
+    async def drop_freemium_dokkai_task(self):
+        # A list of random interesting topics for the daily drop
+        topics = ["Japanese Culture", "A Sci-Fi Adventure", "A Slice of Life moment", "A Mystery", "Japanese Food", "Folklore", "School Life"]
+        topic = random.choice(topics)
+        
+        level_configs = [
+            ("N5", "n5-daily-dokkai"),
+            ("N4", "n4-daily-dokkai"),
+            ("N3", "n3-daily-dokkai"),
+            ("N2", "n2-daily-dokkai"),
+            ("N1", "n1-daily-dokkai")
+        ]
+        
+        for guild in self.guilds:
+            for lvl_name, ch_keyword in level_configs:
+                channel = discord.utils.find(lambda c: ch_keyword in c.name.lower(), guild.channels)
+                if not channel:
+                    continue
+                    
+                prompt = f"""You are an expert Japanese linguist and JLPT examiner.
+                Task: Generate a short narrative (max 300 Japanese characters) about '{topic}'.
+                Constraint 1: Strictly use ONLY vocabulary and grammar points from JLPT levels N5 up to {lvl_name}.
+                Constraint 2: Do not use complex Kanji outside of the specified JLPT level unless furigana is provided in parenthesis.
+                Output Format: Return ONLY valid JSON with exactly two keys: "title" and "story_content". Do not add trailing commas."""
+                
+                try:
+                    raw_text = await generate_gemini_response(prompt)
+                    story_data = extract_json(raw_text)
+                    
+                    if isinstance(story_data, list):
+                        story_data = story_data[0]
+
+                    title = story_data.get("title", f"{lvl_name} Daily Reading")
+                    content = story_data.get("story_content", "Could not generate story.")
+
+                    embed = discord.Embed(title=f"🎁 Daily Free Reading: {title}", description=content, color=0x3498db)
+                    embed.set_footer(text=f"Level: {lvl_name} | Topic: {topic}")
+                    
+                    # We pass the content into the Freemium-specific UI
+                    view = FreemiumStoryView(lvl_name, content)
+                    await channel.send(embed=embed, view=view)
+                    
+                except Exception as e:
+                    print(f"❌ Error dropping {lvl_name} Dokkai: {e}")
+                    
+                # 5-second sleep to handle limits gracefully
+                await asyncio.sleep(5)
+
 
 bot = NihongoBot()
 
@@ -639,7 +763,7 @@ async def read(interaction: discord.Interaction, topic: str):
     has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
     if not has_pro:
         embed = discord.Embed(
-            title="🔒 Premium Feature Unlocked", 
+            title="🔒 Premium Feature Locked", 
             description="Oops! This feature is exclusively available for our **金 Pro Learners 金**.\n\nUnlock the full potential of your Japanese journey with unlimited personalized AI stories, deep grammar analysis, and much more! Upgrade today to access this and other pro tools. ✨", 
             color=0xf1c40f
         )
