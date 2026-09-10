@@ -277,12 +277,14 @@ class FreemiumStoryView(View):
         super().__init__(timeout=None) 
         self.level = level
         self.story_content = story_content
+        # 🧠 SMART CACHE: Saves API hits!
+        self.cached_responses = {}
 
     async def check_premium(self, interaction: discord.Interaction):
         has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
         if not has_pro:
             embed = discord.Embed(
-                title="🔒 Premium Feature Locked", 
+                title="🔒 Premium Feature Unlocked", 
                 description="Oops! Grammar and Vocab analysis are exclusively available for our **金 Pro Learners 金**.\n\nUnlock the full potential of your Japanese journey with unlimited personalized AI stories, deep grammar analysis, and much more! Upgrade today to access this and other pro tools. ✨", 
                 color=0xf1c40f
             )
@@ -292,32 +294,38 @@ class FreemiumStoryView(View):
 
     async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
         await interaction.response.defer(ephemeral=True)
-        prompts = {
-            "translate": f"Translate this Japanese story to English naturally:\n\n{self.story_content}",
-            "grammar": f"Analyze the key JLPT {self.level} grammar points used in this story. Explain them simply:\n\n{self.story_content}",
-            "vocab": f"Extract the key JLPT {self.level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{self.story_content}"
-        }
-        try:
-            response_text = await generate_gemini_response(prompts[task_type])
-            embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x2ecc71)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Analysis failed: {e}", ephemeral=True)
+        
+        # 🚀 CACHE CHECK: Agar pehle se generated hai, toh bina API hit kiye serve karo
+        if task_type in self.cached_responses:
+            response_text = self.cached_responses[task_type]
+        else:
+            # Agar generate nahi hua hai, toh hi API ko request bhejo
+            prompts = {
+                "translate": f"Translate this Japanese story to English naturally:\n\n{self.story_content}",
+                "grammar": f"Analyze the key JLPT {self.level} grammar points used in this story. Explain them simply:\n\n{self.story_content}",
+                "vocab": f"Extract the key JLPT {self.level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{self.story_content}"
+            }
+            try:
+                response_text = await generate_gemini_response(prompts[task_type])
+                # Answer aane ke baad usko cache mein save kar lo
+                self.cached_responses[task_type] = response_text 
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Analysis failed: {e}", ephemeral=True)
+
+        embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x2ecc71)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="🇬🇧 Translate (Free)", style=discord.ButtonStyle.primary)
     async def btn_translate(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Free for everyone, directly handles analysis
         await self.handle_analysis(interaction, "translate")
 
     @discord.ui.button(label="🧠 Analyze Grammar (Pro)", style=discord.ButtonStyle.success)
     async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Checks for Pro role first
         if await self.check_premium(interaction):
             await self.handle_analysis(interaction, "grammar")
 
     @discord.ui.button(label="📖 Extract Vocab (Pro)", style=discord.ButtonStyle.secondary)
     async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Checks for Pro role first
         if await self.check_premium(interaction):
             await self.handle_analysis(interaction, "vocab")
 
