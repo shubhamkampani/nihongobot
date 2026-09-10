@@ -248,16 +248,16 @@ class JLPTSelect(Select):
     Output ONLY a valid JSON array of 20 objects. DO NOT output any other text, greetings, or markdown outside the JSON array. Example:
     [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
         
-        try:
-            raw_text = await generate_gemini_response(prompt)
-            q = extract_json(raw_text)[0]
-            embed = discord.Embed(title=f"🎌 {level_short} Placement Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
-            embed.set_footer(text="⏳ You have 60 seconds to answer.")
-            view = PlacementQuizView(interaction.user, q, selected_role)
-            msg = await interaction.edit_original_response(content="", embed=embed, view=view)
-            view.message = msg
-        except Exception as e:
-            await interaction.edit_original_response(content=f"❌ AI Initialization Error: {e}")
+      try:
+        raw_text = await generate_gemini_response(prompt)
+        questions_data = extract_json(raw_text)
+        q = questions_data[0]
+        embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+        view = QuizView(interaction.user, questions_data, user_level, time.time())
+        msg = await interaction.edit_original_response(content="", embed=embed, view=view)
+        view.message = msg 
+    except Exception as e: 
+        await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
 class WelcomeView(View):
     def __init__(self): super().__init__(timeout=None)
