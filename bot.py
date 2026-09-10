@@ -238,14 +238,13 @@ class JLPTSelect(Select):
         level_short = selected_role.split(" ")[1] 
         await interaction.response.send_message(f"⏳ Generating a 1-question placement test for {level_short}...", ephemeral=True)
         
-        prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab).
+        prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab). Always shuffle the options.
         1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading, without any images or audio (e.g., "雨が降っているので、___をさします。" -> Answer: かさ).
         2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
         3. Must have exactly ONE blank represented by '___'.
-        4. Provide 4 distinct, sensible options. DO NOT put answer in question line and DO NOT repeat words present that are already in the question sentence.
-        5. Ensure high-quality, natural Japanese.
-        6. Ensure furigana of kanjis used, should be written in ([]) square brackets just after kanji used.
-        7. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
+        4. Ensure high-quality, natural Japanese.
+        5. Ensure furigana of kanjis used, should be written in ([]) square brackets just after kanji used.
+        6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
         Output ONLY a valid JSON array format exactly like this:
         [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
         
@@ -425,7 +424,7 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
     3. Each question MUST have exactly one blank space represented by '___'.
     4. When using kanjis write furigana in ([]) square brackets just after the word ends.
-    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically.
+    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically. Always shuffle the options for each question.
     6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
     
     Output ONLY a valid JSON array of 1 objects. DO NOT output any other text or markdown outside the JSON array. Example:
@@ -459,7 +458,7 @@ async def quiz(interaction: discord.Interaction, furigana: app_commands.Choice[s
     2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
     3. Each question MUST have exactly one blank space represented by '___'.
     4. {furigana_rule}
-    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically.
+    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically. Always shuffle the options for each question.
     6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
     
     Output ONLY a valid JSON array of 20 objects. DO NOT output any other text or markdown outside the JSON array. Example:
