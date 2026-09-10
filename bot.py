@@ -14,6 +14,7 @@ import pytz
 from pymongo import MongoClient
 import aiohttp
 import urllib.parse
+import ast
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -53,21 +54,38 @@ def get_fallback_role(current_role_name):
         return ROLE_NAMES[0]
 
 def extract_json(raw_text):
-    """Bulletproof JSON extractor to bypass AI conversational garbage"""
+    """Ultimate JSON Extractor with AST fallback for AI hallucinations"""
     try:
-        # Find the first '[' and the last ']'
-        start_idx = raw_text.find('[')
-        end_idx = raw_text.rfind(']')
+        # 1. Clean markdown formatting
+        cleaned = re.sub(r'```(?:json|JSON)?\s*(.*?)\s*```', r'\1', raw_text, flags=re.DOTALL)
         
-        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-            json_string = raw_text[start_idx:end_idx+1]
-            # Fix trailing commas inside the extracted array
-            json_string = re.sub(r',\s*([\]}])', r'\1', json_string)
-            return json.loads(json_string)
+        # 2. Extract array bounds
+        start = cleaned.find('[')
+        end = cleaned.rfind(']')
+        
+        if start != -1 and end != -1:
+            json_str = cleaned[start:end+1]
         else:
-            raise ValueError("No valid JSON array found in AI output.")
+            start = cleaned.find('{')
+            end = cleaned.rfind('}')
+            if start != -1 and end != -1:
+                json_str = f"[{cleaned[start:end+1]}]"
+            else:
+                raise ValueError("No JSON bounds found in AI output.")
+
+        # 3. Fix trailing commas (common AI mistake)
+        json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+        
+        # 4. Attempt strict JSON parsing
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            # 5. AST Fallback: Parses Python-style dicts (handles single quotes perfectly)
+            safe_python_str = json_str.replace("null", "None").replace("true", "True").replace("false", "False")
+            return ast.literal_eval(safe_python_str)
+
     except Exception as e:
-        print(f"⚠️ JSON Decode Error details: {e}\nRaw Output was:\n{raw_text}")
+        print(f"⚠️ Ultimate JSON Parse Failed: {e}\n--- RAW AI OUTPUT ---\n{raw_text}\n---------------------")
         return [{"question": "AI Formatting Error: Please try clicking again.", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
 # --- 🧠 DIRECT GROQ REST API ---
@@ -220,12 +238,15 @@ class JLPTSelect(Select):
         level_short = selected_role.split(" ")[1] 
         await interaction.response.send_message(f"⏳ Generating a 1-question placement test for {level_short}...", ephemeral=True)
         
-        prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab).
-        Rule 1: Must have exactly ONE blank represented by '___'.
-        Rule 2: Provide 4 distinct, sensible options. DO NOT repeat words that are already in the question sentence.
-        Rule 3: Ensure high-quality, natural Japanese.
-        Output ONLY a valid JSON array format exactly like this:
-        [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
+    prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). The answer should not be present in the question and always jumble up the options too.
+    Strict Rules:
+    1. Each question MUST have exactly one blank space represented by '___'.
+    2. {furigana_rule}
+    3. The 4 options (A, B, C, D) must be logically correct candidates, but ONLY ONE correctly fits.
+    4. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
+    
+    Output ONLY a valid JSON array of 20 objects. DO NOT output any other text, greetings, or markdown outside the JSON array. Example:
+    [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
         
         try:
             raw_text = await generate_gemini_response(prompt)
