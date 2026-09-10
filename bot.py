@@ -242,6 +242,8 @@ class JLPTSelect(Select):
         Rule 1: Must have exactly ONE blank represented by '___'.
         Rule 2: Provide 4 distinct, sensible options. DO NOT put answer in question line and DO NOT repeat words present that are already in the question sentence.
         Rule 3: Ensure high-quality, natural Japanese.
+        Rule 4: Ensure furigana of kanjis used, should be written in ([]) square brackets just after kanji used.
+        Rule 5: CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
         Output ONLY a valid JSON array format exactly like this:
         [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
         
@@ -443,7 +445,7 @@ async def quiz(interaction: discord.Interaction, furigana: app_commands.Choice[s
     user_level = next((r.name.replace("📍 ", "").strip() for r in interaction.user.roles if r.name in ROLE_NAMES), None)
     if not user_level: return await interaction.followup.send("❌ Get a N5-N1 role first.", ephemeral=True)
     
-    furigana_rule = "Use Furigana in brackets after all Kanji (e.g., 漢字【かんじ】)." if furigana.value == "with_furigana" else "DO NOT use Furigana/reading aids. Use standard Kanji."
+    furigana_rule = "Use Furigana in brackets after all Kanji in questions as well as options generated wherever required (e.g., 漢字【かんじ】)." if furigana.value == "with_furigana" else "DO NOT use Furigana/reading aids. Use standard Kanji."
     await interaction.followup.send(f"⏳ Generating 20 {user_level} questions ({furigana.name})...", ephemeral=True)
     
     prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). The answer should not be present in the question and always jumble up the options too.
