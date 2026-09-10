@@ -88,24 +88,25 @@ def extract_json(raw_text):
         print(f"⚠️ Ultimate JSON Parse Failed: {e}\n--- RAW AI OUTPUT ---\n{raw_text}\n---------------------")
         return [{"question": "AI Formatting Error: Please try clicking again.", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
-# --- 🧠 DIRECT GROQ REST API ---
+# --- 🧠 DIRECT GEMINI REST API ---
 async def generate_gemini_response(prompt):
-    api_key = os.environ.get("GROQ_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key: 
-        raise Exception("GROQ_API_KEY missing from Render Environment!")
+        raise Exception("GEMINI_API_KEY missing from Environment!")
     
     clean_key = api_key.strip()
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    # Using the latest Gemini 3.8 Flash model endpoint
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={clean_key}"
     
     payload = {
-        "model": "openai/gpt-oss-20b", 
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5,
-        "max_tokens": 6000
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.5,
+            "maxOutputTokens": 6000
+        }
     }
 
     headers = {
-        "Authorization": f"Bearer {clean_key}",
         "Content-Type": "application/json"
     }
     
@@ -117,8 +118,9 @@ async def generate_gemini_response(prompt):
             
             data = await resp.json()
             try: 
-                return data['choices'][0]['message']['content']
-            except KeyError: 
+                # Extracting text from Gemini's specific JSON structure
+                return data['candidates'][0]['content']['parts'][0]['text']
+            except (KeyError, IndexError): 
                 raise Exception("API returned invalid structure.")
 
 # --- 🧠 PLACEMENT & QUIZ UI LOGIC ---
