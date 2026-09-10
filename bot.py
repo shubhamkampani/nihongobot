@@ -238,26 +238,23 @@ class JLPTSelect(Select):
         level_short = selected_role.split(" ")[1] 
         await interaction.response.send_message(f"⏳ Generating a 1-question placement test for {level_short}...", ephemeral=True)
         
-    prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). The answer should not be present in the question and always jumble up the options too.
-    Strict Rules:
-    1. Each question MUST have exactly one blank space represented by '___'.
-    2. {furigana_rule}
-    3. The 4 options (A, B, C, D) must be logically correct candidates, but ONLY ONE correctly fits.
-    4. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
-    
-    Output ONLY a valid JSON array of 20 objects. DO NOT output any other text, greetings, or markdown outside the JSON array. Example:
-    [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
+        prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab).
+        Rule 1: Must have exactly ONE blank represented by '___'.
+        Rule 2: Provide 4 distinct, sensible options. DO NOT put answer in question line and DO NOT repeat words present that are already in the question sentence.
+        Rule 3: Ensure high-quality, natural Japanese.
+        Output ONLY a valid JSON array format exactly like this:
+        [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
         
-      try:
-        raw_text = await generate_gemini_response(prompt)
-        questions_data = extract_json(raw_text)
-        q = questions_data[0]
-        embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
-        view = QuizView(interaction.user, questions_data, user_level, time.time())
-        msg = await interaction.edit_original_response(content="", embed=embed, view=view)
-        view.message = msg 
-    except Exception as e: 
-        await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
+        try:
+            raw_text = await generate_gemini_response(prompt)
+            q = extract_json(raw_text)[0]
+            embed = discord.Embed(title=f"🎌 {level_short} Placement Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            embed.set_footer(text="⏳ You have 60 seconds to answer.")
+            view = PlacementQuizView(interaction.user, q, selected_role)
+            msg = await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = msg
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Initialization Error: {e}")
 
 class WelcomeView(View):
     def __init__(self): super().__init__(timeout=None)
@@ -419,10 +416,12 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     lvl_short = target_level.value.split(" ")[1]
     await interaction.followup.send(f"⏳ Generating test for {lvl_short}...", ephemeral=True)
     
-    prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium to Hard.
+    prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium.
     Rule 1: Must have exactly ONE blank represented by '___'.
     Rule 2: Provide 4 distinct, sensible options. DO NOT repeat words that are already in the question sentence.
-    Output ONLY a valid JSON array format exactly like this. DO NOT include any conversational text.
+    Rule 3: DO NOT use kanji instead use Hiragana in questions.
+    Rule 4: CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
+    Output ONLY a valid JSON array format exactly like this. DO NOT include any conversational text and DO NOT output any other text, greetings, or markdown outside the JSON array.
     [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
     
     try:
@@ -447,12 +446,12 @@ async def quiz(interaction: discord.Interaction, furigana: app_commands.Choice[s
     furigana_rule = "Use Furigana in brackets after all Kanji (e.g., 漢字【かんじ】)." if furigana.value == "with_furigana" else "DO NOT use Furigana/reading aids. Use standard Kanji."
     await interaction.followup.send(f"⏳ Generating 20 {user_level} questions ({furigana.name})...", ephemeral=True)
     
-    prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab).
+    prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). The answer should not be present in the question and always jumble up the options too.
     Strict Rules:
     1. Each question MUST have exactly one blank space represented by '___'.
     2. {furigana_rule}
-    3. The 4 options (A, B, C, D) must be logically correct candidates, but ONLY ONE correctly fits.
-    4. CRITICAL: Do NOT repeat the word that comes after or before the blank in the options.
+    3. The 4 options (A, B, C, D) must be logically correct, but ONLY ONE will be best and correct fit. Do not hallucinate.
+    4. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
     
     Output ONLY a valid JSON array of 20 objects. DO NOT output any other text, greetings, or markdown outside the JSON array. Example:
     [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
