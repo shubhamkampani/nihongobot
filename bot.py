@@ -83,13 +83,13 @@ async def generate_gemini_response(prompt):
         raise Exception("GROQ_API_KEY missing from Render Environment!")
     
     clean_key = api_key.strip()
-    url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
+    url = "https://api.groq.com/openai/v1/chat/completions"
     
     payload = {
         "model": "openai/gpt-oss-20b", 
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5,
-        "max_tokens": 6000  # <--- Allows 20 questions without cutting off
+        "max_tokens": 6000 # <--- Added this to allow full 20 questions without cutting off
     }
 
     headers = {
