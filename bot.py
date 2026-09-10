@@ -220,7 +220,12 @@ class JLPTSelect(Select):
         level_short = selected_role.split(" ")[1] 
         await interaction.response.send_message(f"⏳ Generating a 1-question placement test for {level_short}...", ephemeral=True)
         
-        prompt = f"""Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
+        prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab).
+        Rule 1: Must have exactly ONE blank represented by '___'.
+        Rule 2: Provide 4 distinct, sensible options. DO NOT repeat words that are already in the question sentence.
+        Rule 3: Ensure high-quality, natural Japanese.
+        Output ONLY a valid JSON array format exactly like this:
+        [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
         
         try:
             raw_text = await generate_gemini_response(prompt)
@@ -293,8 +298,8 @@ class NihongoBot(commands.Bot):
                         if channel and role:
                             hype_msg = (
                                 f"🔔 **Attention {role.mention}!**\n\n"
-                                f"Aaj raat **10:00 PM (Japan Time)** ko is week ke results announce hone wale hain! 🏆\n"
-                                f"Buckle up and give your best! Top #1 pe aane walo ko exclusive server perks aur ultimate bragging rights milenge. "
+                                f"Today at **10:00 PM (Japan Time)** this week's toppers will be announced! 🏆\n"
+                                f"Buckle up and give your best! Those who will get Rank #1 will get special role and accesses for 1 week as well as bragging rights."
                                 f"Take your mock tests using `/quiz` now to climb the ranks! 🎌✨"
                             )
                             try: await channel.send(hype_msg)
@@ -359,7 +364,13 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     
     lvl_short = target_level.value.split(" ")[1]
     await interaction.followup.send(f"⏳ Generating test for {lvl_short}...", ephemeral=True)
-    prompt = f"""Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium to Hard. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
+    
+    prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium to Hard.
+    Rule 1: Must have exactly ONE blank represented by '___'.
+    Rule 2: Provide 4 distinct, sensible options. DO NOT repeat words that are already in the question sentence.
+    Output ONLY a valid JSON array format exactly like this:
+    [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
+    
     try:
         raw_text = await generate_gemini_response(prompt)
         q = extract_json(raw_text)[0]
@@ -370,12 +381,28 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
 @bot.tree.command(name="quiz", description="Take a JLPT test.")
-async def quiz(interaction: discord.Interaction):
+@app_commands.choices(furigana=[
+    app_commands.Choice(name="Yes, include Furigana (Reading aids)", value="with_furigana"),
+    app_commands.Choice(name="No, just standard Kanji", value="without_furigana")
+])
+async def quiz(interaction: discord.Interaction, furigana: app_commands.Choice[str]):
     await interaction.response.defer(ephemeral=True)
     user_level = next((r.name.replace("📍 ", "").strip() for r in interaction.user.roles if r.name in ROLE_NAMES), None)
     if not user_level: return await interaction.followup.send("❌ Get a N5-N1 role first.", ephemeral=True)
-    await interaction.followup.send(f"⏳ Generating 20 {user_level} questions...", ephemeral=True)
-    prompt = f"""Generate 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab). Difficulty: Low to Medium. Output ONLY a valid JSON array format: [{{"question": "...", "options": {{"A": "a", "B": "b", "C": "c", "D": "d"}}, "answer": "B"}}]"""
+    
+    furigana_rule = "Use Furigana in brackets after all Kanji (e.g., 漢字【かんじ】)." if furigana.value == "with_furigana" else "DO NOT use Furigana/reading aids. Use standard Kanji."
+    await interaction.followup.send(f"⏳ Generating 20 {user_level} questions ({furigana.name})...", ephemeral=True)
+    
+    prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab).
+    Strict Rules:
+    1. Each question MUST have exactly one blank space represented by '___'.
+    2. {furigana_rule}
+    3. The 4 options (A, B, C, D) must be logically correct candidates, but ONLY ONE correctly fits.
+    4. CRITICAL: Do NOT repeat the word that comes after or before the blank in the options.
+    
+    Output ONLY a valid JSON array format exactly like this:
+    [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
+    
     try:
         raw_text = await generate_gemini_response(prompt)
         questions_data = extract_json(raw_text)
