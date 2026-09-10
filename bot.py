@@ -91,14 +91,13 @@ def extract_json(raw_text):
         print(f"⚠️ Ultimate JSON Parse Failed: {e}\n--- RAW AI OUTPUT ---\n{raw_text}\n---------------------")
         return [{"question": "AI Formatting Error: Please try clicking again.", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
-# --- 🧠 DIRECT GEMINI REST API ---
+# --- 🧠 DIRECT GEMINI REST API (WITH EXPONENTIAL BACKOFF) ---
 async def generate_gemini_response(prompt):
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key: 
         raise Exception("GEMINI_API_KEY missing from Environment!")
     
     clean_key = api_key.strip()
-    # Using the latest Gemini 3.5 Flash model endpoint
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={clean_key}"
     
     payload = {
@@ -108,23 +107,27 @@ async def generate_gemini_response(prompt):
             "maxOutputTokens": 6000
         }
     }
-
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {"Content-Type": "application/json"}
+    
+    # Exponential Backoff Logic: Wait 1s, 2s, 4s, 8s on HTTP 429
+    backoff_times = [1, 2, 4, 8]
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as resp:
-            if resp.status != 200:
-                err_text = await resp.text()
-                raise Exception(f"HTTP {resp.status}: {err_text}")
-            
-            data = await resp.json()
-            try: 
-                # Extracting text from Gemini's specific JSON structure
-                return data['candidates'][0]['content']['parts'][0]['text']
-            except (KeyError, IndexError): 
-                raise Exception("API returned invalid structure.")
+        for attempt, wait_time in enumerate(backoff_times + [0]):
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    try: 
+                        return data['candidates'][0]['content']['parts'][0]['text']
+                    except (KeyError, IndexError): 
+                        raise Exception("API returned invalid structure.")
+                elif resp.status == 429 and attempt < len(backoff_times):
+                    print(f"⚠️ API Rate Limit Hit (429). Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    err_text = await resp.text()
+                    raise Exception(f"HTTP {resp.status}: {err_text}")
 
 # --- 🧠 PLACEMENT & QUIZ UI LOGIC ---
 class ForceClaimView(View):
@@ -229,6 +232,45 @@ class QuizView(View):
     async def on_timeout(self):
         try: await self.message.edit(content="⏳ **Time's up!** Attempt cancelled to prevent spam.", view=None, embed=None)
         except: pass
+
+class StoryReaderView(View):
+    def __init__(self, user, level, story_content):
+        super().__init__(timeout=None) # No timeout so they can read at their own pace
+        self.user = user
+        self.level = level
+        self.story_content = story_content
+
+    async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ This is not your reading session!", ephemeral=True)
+        
+        # Defer immediately to avoid Discord's 3-second interaction deadline
+        await interaction.response.defer(ephemeral=True)
+        
+        prompts = {
+            "translate": f"Translate this Japanese story to English naturally:\n\n{self.story_content}",
+            "grammar": f"Analyze the key JLPT {self.level} grammar points used in this story. Explain them simply:\n\n{self.story_content}",
+            "vocab": f"Extract the key JLPT {self.level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{self.story_content}"
+        }
+        
+        try:
+            response_text = await generate_gemini_response(prompts[task_type])
+            embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x2ecc71)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Analysis failed: {e}", ephemeral=True)
+
+    @discord.ui.button(label="🇬🇧 Translate", style=discord.ButtonStyle.primary)
+    async def btn_translate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "translate")
+
+    @discord.ui.button(label="🧠 Analyze Grammar", style=discord.ButtonStyle.success)
+    async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "grammar")
+
+    @discord.ui.button(label="📖 Extract Vocab", style=discord.ButtonStyle.secondary)
+    async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "vocab")
 
 # --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
@@ -589,5 +631,56 @@ async def leaderboard_announce(interaction: discord.Interaction, target_level: a
         )
     
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="read", description="[Premium] Generate a personalized Japanese short story based on your JLPT level.")
+@app_commands.describe(topic="What should the story be about? (e.g., Cyberpunk, Romance, Tokyo Trip)")
+async def read(interaction: discord.Interaction, topic: str):
+    # 1. Premium Gating (Role Check)
+    has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+    if not has_pro:
+        embed = discord.Embed(
+            title="🔒 Premium Feature Unlocked", 
+            description="Oops! This feature is exclusively available for our **金 Pro Learners 金**.\n\nUnlock the full potential of your Japanese journey with unlimited personalized AI stories, deep grammar analysis, and much more! Upgrade today to access this and other pro tools. ✨", 
+            color=0xf1c40f
+        )
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # 2. Dynamic Level Detection
+    user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
+    if not user_level_role:
+        return await interaction.response.send_message("❌ Please select a JLPT level first using the welcome channel or `/changerole`.", ephemeral=True)
+    
+    level_short = user_level_role.split(" ")[1] # Extracts "N5", "N4", etc.
+
+    # 3. Defer Response (Avoids 3-second limit while AI thinks)
+    await interaction.response.defer(ephemeral=False) 
+
+    # 4. Deep Research Driven Prompt
+    prompt = f"""You are an expert Japanese linguist and JLPT examiner.
+    Task: Generate a short narrative (max 300 Japanese characters) about '{topic}'.
+    Constraint 1: Strictly use ONLY mix of vocabulary and grammar points from JLPT levels N5 up to {level_short}.
+    Constraint 2: Do not use complex Kanji outside of the specified JLPT level unless furigana is provided in parenthesis.
+    Output Format: Return ONLY valid JSON with exactly two keys: "title" (the story title) and "story_content" (the Japanese story). Do not add trailing commas."""
+    
+    try:
+        raw_text = await generate_gemini_response(prompt)
+        story_data = extract_json(raw_text)
+        
+        # Handle cases where extract_json returns a list containing the dict
+        if isinstance(story_data, list):
+            story_data = story_data[0]
+
+        title = story_data.get("title", f"{level_short} Story")
+        content = story_data.get("story_content", "Could not generate story.")
+
+        # Embed perfectly fits the limits
+        embed = discord.Embed(title=f"🎌 {title}", description=content, color=0x9b59b6)
+        embed.set_footer(text=f"Level: {level_short} | Topic: {topic}")
+        
+        view = StoryReaderView(interaction.user, level_short, content)
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to generate story: {e}")
 
 bot.run(os.environ.get("BOT_TOKEN"))
