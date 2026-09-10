@@ -96,7 +96,7 @@ async def generate_gemini_response(prompt):
     
     clean_key = api_key.strip()
     # Using the latest Gemini 3.5 Flash model endpoint
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={clean_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={clean_key}"
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
