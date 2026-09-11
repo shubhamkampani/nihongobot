@@ -438,7 +438,7 @@ class JournalModal(discord.ui.Modal, title='Daily Japanese Journal'):
         prompt = f"""You are an expert Japanese Sensei. The user is currently at the JLPT {level_short} level.
         Task: Correct their Japanese journal entry. Fix grammatical errors, unnatural phrasing, and particle mistakes.
         CRITICAL RULE: Strictly limit the suggested vocabulary and grammar to the {level_short} level. Do not use overly advanced structures.
-        Output ONLY valid JSON with two keys: "corrected_text" (the fixed Japanese text) and "explanation" (a brief 1-2 sentence explanation of the main mistakes).
+        Output ONLY valid JSON with two keys: "corrected_text" (the fixed Japanese text) and "explanation" (a brief 1-2 sentence explanation of the main mistakes in simple english language).
         User's Text: {user_text}"""
 
         try:
