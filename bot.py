@@ -748,6 +748,7 @@ class NihongoBot(commands.Bot):
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         self.add_view(view)
+        self.vc_cleanup_loop.start()
         await self.tree.sync()
         print("✅ Commands Synced & Tasks Started.")
 
@@ -983,6 +984,22 @@ class NihongoBot(commands.Bot):
                         await channel.delete(reason="Ticket auto-deletion after 48 hours.")
                 except Exception as e:
                     print(f"Error deleting ticket channel: {e}")
+
+    #Bot will check every 10 mintes that if any VC created by /vc command is 8 hours old or not.
+    @tasks.loop(minutes=10)
+    async def vc_cleanup_loop(self):
+        for guild in self.guilds:
+            category = discord.utils.get(guild.categories, name="📣 ボイソ・チャト")
+            if not category:
+                continue
+                
+            for vc in category.voice_channels:
+                # Bot check karega ki VC ko bane hue 8 ghante (8 hours) ho gaye hain ya nahi
+                if discord.utils.utcnow() - vc.created_at > timedelta(hours=8):
+                    try:
+                        await vc.delete(reason="8 hour auto-delete limit reached.")
+                    except Exception as e:
+                        print(f"Failed to delete VC: {e}")
 
 bot = NihongoBot()
 
@@ -1295,6 +1312,130 @@ async def announce(interaction: discord.Interaction, message: str):
     await interaction.channel.send(content=ping_content, embed=embed)
     
     await interaction.followup.send("✅ Announcement broadcasted, mentioned roles have been notified!", ephemeral=True)
+
+@bot.tree.command(name="vc", description="Manage your personal 8-hour on-demand Voice Channel.")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Create New VC", value="create"),
+    app_commands.Choice(name="Add Members to existing VC", value="add"),
+    app_commands.Choice(name="Revoke VC Access", value="revoke")
+])
+@app_commands.describe(mentions="Mention users (e.g., @user1 @user2). Leave empty if creating just for yourself.")
+async def manage_vc(interaction: discord.Interaction, action: app_commands.Choice[str], mentions: str = ""):
+    # 1. Must be used in bot-commands
+    if "bot-commands" not in interaction.channel.name.lower():
+        return await interaction.response.send_message("❌ Please use this command exclusively in `#🤖・bot-commands`.", ephemeral=True)
+    
+    await interaction.response.defer(ephemeral=True)
+
+    # 2. Level Validation Setup
+    valid_roles = ROLE_NAMES + ["📍 Native Japanese"]
+    user_levels = [r.name for r in interaction.user.roles if r.name in valid_roles]
+    has_champion = any(r.name == "Special Weekly Champion" for r in interaction.user.roles)
+
+    if not user_levels:
+        return await interaction.followup.send("❌ You must have a JLPT (N5-N1) or Native Japanese role to use this feature.", ephemeral=True)
+
+    # 3. Category Setup
+    category = discord.utils.get(interaction.guild.categories, name="📣 ボイソ・チャト")
+    if not category:
+        category = await interaction.guild.create_category("📣 ボイソ・チャト")
+
+    # 4. Parse Mentions & Check Level Matching
+    target_members = []
+    if mentions:
+        # Extracts user IDs from mentions
+        member_ids = [int(uid) for uid in re.findall(r'<@!?(\d+)>', mentions)]
+        for uid in member_ids:
+            member = interaction.guild.get_member(uid)
+            if member and member != interaction.user:
+                if not has_champion:
+                    target_levels = [r.name for r in member.roles if r.name in valid_roles]
+                    # Check if they share at least one JLPT role
+                    if not set(user_levels).intersection(set(target_levels)):
+                        return await interaction.followup.send(f"❌ JLPT Role levels not matching with {member.mention}. Only Weekly Champions can invite mixed levels!", ephemeral=True)
+                target_members.append(member)
+
+    # 5. Find if user already has an active VC
+    # We identify ownership by checking if the user has specific 'move_members' permissions in the VC
+    user_vc = None
+    for vc in category.voice_channels:
+        if vc.overwrites_for(interaction.user).move_members:
+            user_vc = vc
+            break
+
+    # 🟢 ACTION: CREATE
+    if action.value == "create":
+        if user_vc:
+            return await interaction.followup.send("❌ Your personal voice room already exists! You cannot make another until it gets automatically deleted after 8 hours.", ephemeral=True)
+
+        overwrites = {
+            # Visible to everyone, but they cannot connect by default
+            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
+            # Creator can connect and gets hidden owner tag (move_members)
+            interaction.user: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True)
+        }
+        
+        # Add targets
+        for tm in target_members:
+            overwrites[tm] = discord.PermissionOverwrite(view_channel=True, connect=True)
+            
+        # Add Safety Admins
+        jr_admin = discord.utils.get(interaction.guild.roles, name="Junior Admin（ジュニア・アデュミン）")
+        sr_admin = discord.utils.get(interaction.guild.roles, name="Senior Admin（セィニア・アデュミン）")
+        if jr_admin: overwrites[jr_admin] = discord.PermissionOverwrite(view_channel=True, connect=True)
+        if sr_admin: overwrites[sr_admin] = discord.PermissionOverwrite(view_channel=True, connect=True)
+
+        new_vc = await interaction.guild.create_voice_channel(
+            name=f"{interaction.user.display_name}'s VC",
+            category=category,
+            overwrites=overwrites
+        )
+        
+        ping_str = " ".join([m.mention for m in target_members])
+        notif_msg = f"✅ {interaction.user.mention} created a personal VC: {new_vc.mention}! {ping_str}\n*(This channel and message will auto-delete in 8 hours)*"
+        
+        # Send public ping in channel, and it auto-deletes in 28800 seconds (8 hours)
+        await interaction.channel.send(notif_msg, delete_after=28800)
+        await interaction.followup.send("✅ VC Created successfully.", ephemeral=True)
+
+    # 🟢 ACTION: ADD MEMBERS
+    elif action.value == "add":
+        if not user_vc:
+            return await interaction.followup.send("❌ You don't have an active personal voice channel. Please create one first.", ephemeral=True)
+        if not target_members:
+            return await interaction.followup.send("❌ Please mention at least one valid user to add.", ephemeral=True)
+
+        for tm in target_members:
+            await user_vc.set_permissions(tm, view_channel=True, connect=True)
+
+        ping_str = " ".join([m.mention for m in target_members])
+        notif_msg = f"✅ {interaction.user.mention} granted VC access to {ping_str} for {user_vc.mention}!\n*(This message will auto-delete in 8 hours)*"
+        
+        await interaction.channel.send(notif_msg, delete_after=28800)
+        await interaction.followup.send("✅ Members added successfully.", ephemeral=True)
+
+    # 🟢 ACTION: REVOKE MEMBERS
+    elif action.value == "revoke":
+        if not user_vc:
+            return await interaction.followup.send("❌ You don't have an active personal voice channel. Please create one first.", ephemeral=True)
+        if not target_members:
+            return await interaction.followup.send("❌ Please mention at least one valid user to revoke.", ephemeral=True)
+
+        for tm in target_members:
+            # Remove permissions
+            await user_vc.set_permissions(tm, overwrite=None)
+            # If they are currently in the VC, physically disconnect them
+            if tm in user_vc.members:
+                try: 
+                    await tm.move_to(None) 
+                except Exception: 
+                    pass
+
+        ping_str = " ".join([m.mention for m in target_members])
+        notif_msg = f"🚫 {interaction.user.mention} revoked VC access from {ping_str} for {user_vc.mention}!\n*(This message will auto-delete in 8 hours)*"
+        
+        await interaction.channel.send(notif_msg, delete_after=28800)
+        await interaction.followup.send("✅ Members revoked and disconnected successfully.", ephemeral=True)
     
 
 bot.run(os.environ.get("BOT_TOKEN"))
