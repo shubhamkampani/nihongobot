@@ -631,7 +631,7 @@ class PersistentTicketPanelView(View):
             return await interaction.response.send_message("❌ Only official JP Learners (N5-N1) can report incidents. Visitors cannot use this feature.", ephemeral=True)
         await self.create_ticket(interaction, "INCIDENT REPORT", "incident")
 
-    @discord.ui.button(label="GO PRO", style=discord.ButtonStyle.success, emoji="🌟", custom_id="panel_gopro")
+    @discord.ui.button(label="GO PRO", style=discord.ButtonStyle.success, emoji="💱", custom_id="panel_gopro")
     async def btn_gopro(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket(interaction, "PRO ENQUIRY", "GoPro")
 
@@ -1207,8 +1207,8 @@ async def setup_tickets(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎫 Server Support & Enquiries", 
         description="Need help? Click a button below to open a ticket. Please choose correct option as needed.\n\n"
-                    "📘 **SUPPORT TICKET:** General help, bot issues, or server queries.\n"
-                    "❗ **REPORT AN INCIDENT:** Report rule-breaking or severe glitches (Learner Roles Only).\n"
+                    "🟦 **SUPPORT TICKET:** General help, bot issues, or server queries.\n"
+                    "🟥 **REPORT AN INCIDENT:** Report rule-breaking or severe glitches (Learner Roles Only).\n"
                     "💴 **GO PRO:** Enquire about or purchase the Pro Subscription and get access to exclusive features.", 
         color=0x2c3e50
     )
