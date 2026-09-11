@@ -47,7 +47,8 @@ GREETINGS_LIST = [
 ]
 
 def has_main_role(member):
-    return any(r.name in ROLE_NAMES or r.name == "Visitor" for r in member.roles)
+    return any(r.name in ROLE_NAMES or r.name in ["Visitor", "📍 Native Japanese"] for r in member.roles)
+
 
 def get_fallback_role(current_role_name):
     try:
@@ -150,10 +151,11 @@ class ForceClaimView(View):
         await interaction.response.edit_message(content=f"✅ You chose to keep your selected level. You are now an **{self.target_role}**!", view=None, embed=None)
 
 class PlacementQuizView(View):
-    def __init__(self, user, question_data, target_role_name, is_changerole=False):
+    def __init__(self, user, question_data, target_role_name, is_changerole=False, is_native=False):
         super().__init__(timeout=60)
         self.user, self.q, self.target_role = user, question_data, target_role_name
         self.is_changerole = is_changerole
+        self.is_native = is_native # 🟢 Tracks if it's a Native Test
         
         for label in ["A", "B", "C", "D"]:
             btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
@@ -175,6 +177,10 @@ class PlacementQuizView(View):
         else:
             if self.is_changerole:
                 await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed.", embed=None, view=None)
+            elif self.is_native:
+                # 🟢 NATIVE FAILED LOGIC: Shows the Welcome Menu Again!
+                embed = discord.Embed(title="⚠️ Native Placement Test Failed", description=f"The correct answer was **{self.q['answer']}**.\n\nYou did not pass the Native Japanese test. Please choose your path again below to retry or select a different option.", color=discord.Color.red())
+                await interaction.response.edit_message(content="", embed=embed, view=WelcomeView())
             else:
                 fallback = get_fallback_role(self.target_role)
                 if fallback == self.target_role:
@@ -639,10 +645,10 @@ class PersistentTicketPanelView(View):
 class JLPTSelect(Select):
     def __init__(self):
         opts = [discord.SelectOption(label=r.split(" ", 1)[1], emoji="📍", value=r) for r in ROLE_NAMES]
-        super().__init__(placeholder="Select your target JLPT Level...", min_values=1, max_values=1, options=opts, custom_id="jlpt_dropdown")
+        super().__init__(placeholder="Select JLPT Level you're preparing for...", min_values=1, max_values=1, options=opts, custom_id="jlpt_dropdown")
 
     async def callback(self, interaction: discord.Interaction):
-        if has_main_role(interaction.user): return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade.", ephemeral=True)
+        if has_main_role(interaction.user): return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade to your current JLPT preparation level.", ephemeral=True)
             
         selected_role = self.values[0]
         level_short = selected_role.split(" ")[1] 
@@ -674,7 +680,7 @@ class WelcomeView(View):
 
     @discord.ui.button(label="📸 Visitor", style=discord.ButtonStyle.secondary, custom_id="role_visitor")
     async def visitor_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if has_main_role(interaction.user): return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade.", ephemeral=True)
+        if has_main_role(interaction.user): return await interaction.response.send_message("❌ You already have a role! Please use `/changerole` to upgrade your current preparation level.", ephemeral=True)
         role = discord.utils.get(interaction.guild.roles, name="Visitor") 
         if role:
             await interaction.user.add_roles(role)
@@ -687,6 +693,36 @@ class WelcomeView(View):
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         await interaction.response.send_message("Awesome! Please select your target JLPT level below:", view=view, ephemeral=True)
+
+    # 🟢 NEW NATIVE BUTTON (Green/Success color)
+    @discord.ui.button(label="⛩️ Native Japanese", style=discord.ButtonStyle.success, custom_id="role_native")
+    async def native_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if has_main_role(interaction.user): 
+            return await interaction.response.send_message("❌ You already have a role!", ephemeral=True)
+        
+        await interaction.response.send_message("⏳ Generating a hard Native/N1+ level placement test...", ephemeral=True)
+        
+        prompt = """You are an expert Japanese linguist. Generate exactly 1 extremely hard multiple-choice question at a Native/Post-N1 level (e.g., highly advanced Kanji reading, obscure idioms, or complex classical grammar that a native japanese can understand).
+        1. CONTEXT-RICH TEXT ONLY: No images or audio.
+        2. Must have exactly ONE blank represented by '___'.
+        3. Ensure high-quality, natural Japanese.
+        4. Do NOT provide furigana for this level, let it be difficult as question is being asked from native japnese for verification.
+        5. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
+        Output ONLY a valid JSON array format exactly like this:
+        [{"question": "...", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, "answer": "A"}]"""
+        
+        try:
+            raw_text = await generate_gemini_response(prompt)
+            q = extract_json(raw_text)[0]
+            embed = discord.Embed(title=f"⛩️ Native Japanese Placement Test", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x2ecc71)
+            embed.set_footer(text="⏳ You have 60 seconds to answer.")
+            
+            # Pass is_native=True so it loops back on fail
+            view = PlacementQuizView(interaction.user, q, "📍 Native Japanese", is_native=True)
+            msg = await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = msg
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Initialization Error: {e}")
 
 # --- 🤖 MAIN BOT CLASS & BACKGROUND TASKS ---
 class NihongoBot(commands.Bot):
@@ -718,7 +754,15 @@ class NihongoBot(commands.Bot):
     async def on_member_join(self, member: discord.Member):
         welcome_ch = discord.utils.find(lambda c: "welcome" in c.name.lower(), member.guild.channels)
         if welcome_ch:
-            embed = discord.Embed(title="🌸 Choose Your Path", description="To get started, please select your role below:\n\n📸 **Visitor:** I'm just exploring.\n🎌 **JP Learner:** I am studying Japanese.", color=0xffb6c1)
+            # 🟢 UPDATED TEXT WITH PREPARING FOR INSTRUCTION
+            embed = discord.Embed(
+                title="🌸 Choose Your Path", 
+                description="To get started, please select your role below:\n\n"
+                            "📸 **Visitor:** I'm just exploring.\n"
+                            "🎌 **JP Learner:** I am studying Japanese. *(Please select the level you are PREPARING FOR, not the one you have already passed!)*\n"
+                            "⛩️ **Native Japanese:** I am a native speaker (Requires passing 1 hard N1+ test).", 
+                color=0xffb6c1
+            )
             try: await welcome_ch.send(content=f"{random.choice(GREETINGS_LIST)} Welcome to the community, {member.mention}!", embed=embed, view=WelcomeView())
             except Exception: pass
 
