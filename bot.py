@@ -541,10 +541,14 @@ class ScenarioSelect(Select):
     def __init__(self, options_data):
         self.options_data = options_data
         select_options = []
+        emojis = ["🇦", "🇧", "🇨", "🇩"]
+        
         for idx, opt in enumerate(options_data):
-            label = opt['label'][:100]
-            select_options.append(discord.SelectOption(label=label, value=str(idx), emoji="💬"))
-        super().__init__(placeholder="Select the most natural Japanese response...", min_values=1, max_values=1, options=select_options)
+            # Dropdown will now show "Option A", "Option B", etc. nicely
+            label_name = f"Option {chr(65+idx)}" 
+            select_options.append(discord.SelectOption(label=label_name, value=str(idx), emoji=emojis[idx]))
+            
+        super().__init__(placeholder="Select your answer (A, B, C, or D)...", min_values=1, max_values=1, options=select_options)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -561,6 +565,8 @@ class ScenarioSelect(Select):
         color = 0x2ecc71 if is_correct else 0xe74c3c
 
         embed = discord.Embed(title=f"{status_emoji} Detailed Breakdown", color=color)
+        
+        # Shows the full Japanese string they chose
         embed.add_field(name="Your Choice", value=f"**{selected_opt['label']}**\n{selected_opt['explanation']}", inline=False)
         
         all_exp = ""
@@ -576,7 +582,6 @@ class ScenarioView(View):
     def __init__(self, options_data):
         super().__init__(timeout=None)
         self.add_item(ScenarioSelect(options_data))
-
 
 # --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
@@ -1124,7 +1129,13 @@ async def scenario(interaction: discord.Interaction):
         if not options_data:
             raise ValueError("No options generated.")
             
-        embed = discord.Embed(title=f"🎯 {level_short} Nuance Simulator", description=f"**Situation:**\n{situation}\n\n*Select the most natural Japanese response from the dropdown below!*", color=0xe67e22)
+        # 🟢 NEW: Format the Japanese options to show fully inside the Embed
+        options_display = ""
+        emojis = ["🇦", "🇧", "🇨", "🇩"]
+        for idx, opt in enumerate(options_data):
+            options_display += f"{emojis[idx]} **{opt['label']}**\n\n"
+            
+        embed = discord.Embed(title=f"🎯 {level_short} Nuance Simulator", description=f"**Situation:**\n{situation}\n\n**Options:**\n{options_display}*Select your answer (A, B, C, or D) from the dropdown below!*", color=0xe67e22)
         embed.set_author(name=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
         
         view = ScenarioView(options_data)
