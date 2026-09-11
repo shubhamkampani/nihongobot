@@ -1244,12 +1244,12 @@ async def announce(interaction: discord.Interaction, message: str):
     if interaction.guild.icon:
         embed.set_thumbnail(url=interaction.guild.icon.url)
         
-    embed.set_footer(text="Nihongo Server Updates")
+    embed.set_footer(text="にほご学習者の社会 ~Server Updates")
     
     # 4. Send mentions as content (to trigger notifications) and the aesthetic Embed
     await interaction.channel.send(content=ping_content, embed=embed)
     
-    await interaction.followup.send("✅ Announcement broadcasted successfully with notifications!", ephemeral=True)
+    await interaction.followup.send("✅ Announcement broadcasted, mentioned roles have been notified!", ephemeral=True)
     
 
 bot.run(os.environ.get("BOT_TOKEN"))
