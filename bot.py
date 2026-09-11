@@ -530,6 +530,111 @@ class ScenarioView(View):
         super().__init__(timeout=None)
         self.add_item(ScenarioSelect(options_data))
 
+class PersistentTicketCloseView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.secondary, emoji="🔒", custom_id="ticket_close_btn")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        # Check if already closed
+        if interaction.channel.category and "CLOSED TICKETS" in interaction.channel.category.name:
+            return await interaction.followup.send("⚠️ This ticket is already closed.", ephemeral=True)
+
+        guild = interaction.guild
+        closed_category = discord.utils.get(guild.categories, name="🎟️ CLOSED TICKETS")
+        if not closed_category:
+            closed_category = await guild.create_category("🎟️ CLOSED TICKETS")
+
+        # Move channel to closed category and sync permissions (so it's hidden from regular members)
+        await interaction.channel.edit(category=closed_category, sync_permissions=True)
+        
+        # 🟢 SMART TRICK: Save timestamp in channel topic for DB-free auto-deletion
+        close_timestamp = int(time.time())
+        current_topic = interaction.channel.topic or ""
+        
+        # Don't schedule deletion for GoPro tickets
+        if "gopro" not in interaction.channel.name.lower():
+            await interaction.channel.edit(topic=f"{current_topic} | closed_at:{close_timestamp}")
+            msg = "🔒 Ticket closed. It will be permanently deleted in 48 hours."
+        else:
+            msg = "🔒 Pro Ticket closed. This ticket will be archived permanently for payment records."
+
+        embed = discord.Embed(title="Ticket Closed", description=msg, color=0xe74c3c)
+        await interaction.channel.send(embed=embed)
+
+class PersistentTicketPanelView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def create_ticket(self, interaction: discord.Interaction, ticket_type: str, prefix: str):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        user = interaction.user
+
+        # Fetch or create the Open Tickets category
+        open_category = discord.utils.get(guild.categories, name="🎟️ OPEN TICKETS")
+        if not open_category:
+            open_category = await guild.create_category("🎟️ OPEN TICKETS")
+
+        # Generate a short 4-character random serial to avoid DB usage
+        serial = ''.join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=4))
+        channel_name = f"{prefix}-{user.name}-{serial}".lower()
+
+        # Channel Permissions: Only User, Bot, and Admins can see it
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+        }
+
+        # Create the ticket channel
+        ticket_channel = await guild.create_text_channel(name=channel_name, category=open_category, overwrites=overwrites)
+
+        # Welcome message inside the ticket
+        embed = discord.Embed(
+            title=f"🎫 {ticket_type}", 
+            description=f"Welcome {user.mention}!\n\nPlease describe your problem or inquiry in detail below. An Admin will be with you ASAP.\n\n*Click the 🔒 button below when your issue is resolved to close this ticket.*",
+            color=0x3498db
+        )
+        await ticket_channel.send(content=user.mention, embed=embed, view=PersistentTicketCloseView())
+        await interaction.followup.send(f"✅ Ticket created successfully! Jump to your ticket here: {ticket_channel.mention}", ephemeral=True)
+
+        # Notification to #new-support-ticket
+        log_channel = discord.utils.get(guild.channels, name="new-support-ticket")
+        if log_channel:
+            if prefix == "gopro":
+                sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
+                mod = discord.utils.get(guild.roles, name="Moderator")
+                ping_str = f"{sr_admin.mention if sr_admin else ''} {mod.mention if mod else ''}"
+                note = "\n⚠️ **NOTE:** *Only Senior Admins and Moderators are authorized to deal with Pro Subscriptions. Junior Admins should ignore this ticket.*"
+            else:
+                jr_admin = discord.utils.get(guild.roles, name="Junior Admin（ジュニア・アデュミン）")
+                sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
+                ping_str = f"{jr_admin.mention if jr_admin else ''} {sr_admin.mention if sr_admin else ''}"
+                note = ""
+
+            log_embed = discord.Embed(title=f"🚨 New {ticket_type}", description=f"**User:** {user.mention}\n**Channel:** {ticket_channel.mention}\n**Type:** {ticket_type}{note}", color=0xe67e22)
+            await log_channel.send(content=ping_str, embed=log_embed)
+
+    @discord.ui.button(label="CREATE A SUPPORT TICKET", style=discord.ButtonStyle.primary, custom_id="panel_support")
+    async def btn_support(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not has_main_role(interaction.user) and not any(r.name == "Visitor" for r in interaction.user.roles):
+            return await interaction.response.send_message("❌ You need a role to create a ticket.", ephemeral=True)
+        await self.create_ticket(interaction, "SUPPORT TICKET", "support")
+
+    @discord.ui.button(label="REPORT AN INCIDENT", style=discord.ButtonStyle.danger, custom_id="panel_incident")
+    async def btn_incident(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Strictly N5 to N1 (No Visitors allowed)
+        if not any(r.name in ROLE_NAMES for r in interaction.user.roles):
+            return await interaction.response.send_message("❌ Only official JP Learners (N5-N1) can report incidents. Visitors cannot use this feature.", ephemeral=True)
+        await self.create_ticket(interaction, "INCIDENT REPORT", "incident")
+
+    @discord.ui.button(label="GO PRO", style=discord.ButtonStyle.success, emoji="🌟", custom_id="panel_gopro")
+    async def btn_gopro(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.create_ticket(interaction, "PRO ENQUIRY", "GoPro")
+
 # --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
     def __init__(self):
@@ -592,13 +697,18 @@ class NihongoBot(commands.Bot):
         super().__init__(command_prefix='!', intents=intents, help_command=None)
 
     async def setup_hook(self):
+            #... existing tasks ...
         self.weekly_leaderboard_loop.start()
         self.daily_kanji_loop.start()
         self.freemium_dokkai_loop.start()
+        self.ticket_cleanup_loop.start() # 🟢 Start ticket auto-deletion loop
+            #... existing views ...
         self.add_view(WelcomeView())
         self.add_view(PersistentJournalView())
         self.add_view(PersistentFreemiumStoryView()) 
         self.add_view(PersistentDailyKanjiView())    
+        self.add_view(PersistentTicketPanelView())
+        self.add_view(PersistentTicketCloseView())
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         self.add_view(view)
@@ -805,6 +915,30 @@ class NihongoBot(commands.Bot):
                     print(f"❌ Error dropping {lvl_name} Dokkai: {e}")
                     
                 await asyncio.sleep(5)
+
+    #Loop for deleting support tickets automatically after 48 hours, except Go Pro queries.
+    @tasks.loop(hours=1)
+    async def ticket_cleanup_loop(self):
+        # Runs every hour to check for 48h old closed tickets
+        for guild in self.guilds:
+            closed_category = discord.utils.get(guild.categories, name="🎟️ CLOSED TICKETS")
+            if not closed_category:
+                continue
+                
+            for channel in closed_category.channels:
+                if not channel.topic or "closed_at:" not in channel.topic:
+                    continue
+                
+                try:
+                    # Extract timestamp from topic
+                    topic_data = channel.topic.split("closed_at:")
+                    closed_timestamp = int(topic_data[-1].strip())
+                    
+                    # 48 hours = 172800 seconds
+                    if time.time() - closed_timestamp >= 172800:
+                        await channel.delete(reason="Ticket auto-deletion after 48 hours.")
+                except Exception as e:
+                    print(f"Error deleting ticket channel: {e}")
 
 bot = NihongoBot()
 
@@ -1050,6 +1184,7 @@ async def scenario(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to generate scenario: {e}", ephemeral=True)
 
+#Reset Kanji Counter for daily kanji drops
 @bot.tree.command(name="resetkanji", description="[Admin Only] Reset Daily Kanji tracker.")
 async def reset_kanji(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -1057,5 +1192,28 @@ async def reset_kanji(interaction: discord.Interaction):
         return await interaction.followup.send("❌ Access Denied.", ephemeral=True)
     kanji_db.delete_many({})
     await interaction.followup.send("✅ Kanji tracker reset to Day 1.", ephemeral=True)
+    
+#Setup Ticket option in 🎫・create-a-ticket channel.
+@bot.tree.command(name="setuptickets", description="[Admin Only] Drop the Support Ticket panel in the current channel.")
+async def setup_tickets(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied. Only Senior Admins can setup the ticket panel.", ephemeral=True)
+    
+    if "create-a-ticket" not in interaction.channel.name.lower():
+        return await interaction.followup.send("❌ Please use this command in the `#🎫・create-a-ticket` channel.", ephemeral=True)
+    
+    embed = discord.Embed(
+        title="🎫 Server Support & Enquiries", 
+        description="Need help? Click a button below to open a ticket.\n\n"
+                    "🟦 **SUPPORT TICKET:** General help, bot issues, or server queries.\n"
+                    "🟥 **REPORT AN INCIDENT:** Report rule-breaking or severe glitches (Learner Roles Only).\n"
+                    "🌟 **GO PRO:** Enquire about or purchase the Pro Subscription.", 
+        color=0x2c3e50
+    )
+    
+    await interaction.channel.send(embed=embed, view=PersistentTicketPanelView())
+    await interaction.followup.send("✅ Ticket panel deployed successfully!", ephemeral=True)
 
 bot.run(os.environ.get("BOT_TOKEN"))
