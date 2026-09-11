@@ -1216,4 +1216,40 @@ async def setup_tickets(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=PersistentTicketPanelView())
     await interaction.followup.send("✅ Ticket panel deployed successfully!", ephemeral=True)
 
+#Announce command for admin announcement in server
+@bot.tree.command(name="announce", description="[Admin Only] Send an official announcement in the current channel.")
+@app_commands.describe(message="The announcement message you want to broadcast.")
+async def announce(interaction: discord.Interaction, message: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    # 1. Strict Role Check
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied. Only Senior Admins and Founders can make official announcements.", ephemeral=True)
+    
+    # 2. 🟢 THE PING FIX: Extract all mentions from the message
+    # Discord embeds do NOT ping users/roles. We must put them in the regular message content.
+    mentions = re.findall(r'<@!?\d+>|<@&\d+>|@everyone|@here', message)
+    ping_content = " ".join(mentions) if mentions else ""
+    
+    # 3. Build the visually appealing Embed
+    announcement_text = f"{message}\n\n*~ sent on behalf of {interaction.user.mention}*"
+    
+    embed = discord.Embed(
+        title="📢 Official Announcement", 
+        description=announcement_text, 
+        color=0xf1c40f # Premium Golden color
+    )
+    
+    if interaction.guild.icon:
+        embed.set_thumbnail(url=interaction.guild.icon.url)
+        
+    embed.set_footer(text="Nihongo Server Updates")
+    
+    # 4. Send mentions as content (to trigger notifications) and the aesthetic Embed
+    await interaction.channel.send(content=ping_content, embed=embed)
+    
+    await interaction.followup.send("✅ Announcement broadcasted successfully with notifications!", ephemeral=True)
+    
+
 bot.run(os.environ.get("BOT_TOKEN"))
