@@ -485,6 +485,119 @@ class PersistentJournalView(View):
         
         await interaction.response.send_modal(JournalModal())
 
+class ScenarioSelect(Select):
+    def __init__(self, options_data):
+        self.options_data = options_data
+        select_options = []
+        for idx, opt in enumerate(options_data):
+            label = opt['label'][:100]
+            select_options.append(discord.SelectOption(label=label, value=str(idx), emoji="💬"))
+        super().__init__(placeholder="Select the most natural Japanese response...", min_values=1, max_values=1, options=select_options)
+
+    async def callback(self, interaction: discord.Interaction):
+        # 1. Ephemeral defer ensures the explanation is private to the user clicking it
+        await interaction.response.defer(ephemeral=True)
+
+        # 2. Check if the interacting user is a Pro Learner
+        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+        if not has_pro:
+            return await interaction.followup.send("❌ You need the **金 Pro Learners 金** role to answer Scenario Drills!", ephemeral=True)
+
+        selected_idx = int(self.values[0])
+        selected_opt = self.options_data[selected_idx]
+        
+        is_correct = selected_opt.get("is_correct", False)
+        status_emoji = "✅ Correct!" if is_correct else "❌ Incorrect!"
+        color = 0x2ecc71 if is_correct else 0xe74c3c
+
+        # 3. Build the detailed breakdown embed
+        embed = discord.Embed(title=f"{status_emoji} Detailed Breakdown", color=color)
+        
+        # Show their specific choice
+        embed.add_field(name="Your Choice", value=f"**{selected_opt['label']}**\n{selected_opt['explanation']}", inline=False)
+        
+        # Show explanations for ALL options so they learn the nuance
+        all_exp = ""
+        for opt in self.options_data:
+            mark = "✅" if opt.get("is_correct") else "❌"
+            all_exp += f"{mark} **{opt['label']}**\n{opt['explanation']}\n\n"
+        
+        embed.add_field(name="All Options Analyzed", value=all_exp[:1024], inline=False)
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+class ScenarioView(View):
+    def __init__(self, options_data):
+        super().__init__(timeout=None)
+        self.add_item(ScenarioSelect(options_data))
+
+@bot.tree.command(name="scenario", description="[Premium] Spawn an interactive Japanese nuance scenario.")
+async def scenario(interaction: discord.Interaction):
+    # 1. Strict Authorization & Channel Check
+    has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+    is_correct_channel = "scenario-based-learning" in interaction.channel.name.lower()
+    
+    if not has_pro or not is_correct_channel:
+        embed = discord.Embed(
+            title="🔒 Premium Feature or Wrong Channel", 
+            description="Oops! To use this feature, you must be a **金 Pro Learners 金** AND use the command exclusively in the `#🧟‍♀️・scenario-based-learning` channel.\n\nUpgrade to Pro to unlock advanced real-world scenario drills!", 
+            color=0xf1c40f
+        )
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # 2. Ephemeral defer so the "thinking" text doesn't clutter the public chat
+    await interaction.response.defer(ephemeral=True) 
+    
+    # 3. Dynamic Level Detection
+    user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
+    level_short = user_level_role.split(" ")[1] if user_level_role else "N3"
+
+    # 4. Deep Prompt Engineering for Thrilling Scenarios & Furigana
+    prompt = f"""You are an expert Japanese linguist. The user is at the JLPT {level_short} level.
+    Create a highly engaging, realistic, and tense real-world situation in English. Examples of good themes: dealing with a strict police officer for a visa check, managing a dispute with a foreign Airbnb guest, an intense corporate IT rollout meeting, coordinating a tactical push in a multiplayer FPS game, or a technical debate about car maintenance, such scenarios. These are just examples of interesting scenarios, and scenarios should be of similar nature.
+    
+    Provide exactly 4 Japanese responses the user could say. Only ONE is contextually and pragmatically appropriate for the formality and nuance of the situation. The other 3 should be grammatically similar but contextually wrong (rude, unnatural, or wrong nuance). 
+    
+    CRITICAL RULES:
+    1. Keep Japanese vocabulary strictly within {level_short} or below.
+    2. If ANY Kanji is used in the options, you MUST provide its furigana in square brackets exactly after the Kanji (e.g., 毎日[まいにち]).
+    
+    Output ONLY valid JSON format exactly like this:
+    {{
+        "situation": "The English scenario description (max 3 sentences).",
+        "options": [
+            {{"label": "Japanese response 1", "explanation": "Why this is correct/wrong and its nuance.", "is_correct": false}},
+            {{"label": "Japanese response 2", "explanation": "Why this is correct/wrong and its nuance.", "is_correct": true}},
+            {{"label": "Japanese response 3", "explanation": "Why this is correct/wrong and its nuance.", "is_correct": false}},
+            {{"label": "Japanese response 4", "explanation": "Why this is correct/wrong and its nuance.", "is_correct": false}}
+        ]
+    }}"""
+    
+    try:
+        raw_text = await generate_gemini_response(prompt)
+        data = extract_json(raw_text)
+        if isinstance(data, list): data = data[0]
+        
+        situation = data.get("situation", "Scenario generation failed.")
+        options_data = data.get("options", [])
+        
+        if not options_data:
+            raise ValueError("No options generated.")
+            
+        embed = discord.Embed(title=f"🎯 {level_short} Nuance Simulator", description=f"**Situation:**\n{situation}\n\n*Select the most natural Japanese response from the dropdown below!*", color=0xe67e22)
+        embed.set_author(name=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        
+        view = ScenarioView(options_data)
+        
+        # 5. Send publicly to the channel and auto-delete after 24 hours (86400 seconds)
+        await interaction.channel.send(embed=embed, view=view, delete_after=86400)
+        
+        # 6. Notify the user privately that it was successful
+        await interaction.followup.send("✅ Scenario generated successfully in the channel! It will automatically disappear in 24 hours.", ephemeral=True)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to generate scenario: {e}", ephemeral=True)
+
 
 # --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
