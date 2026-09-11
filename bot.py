@@ -369,6 +369,123 @@ class DailyKanjiView(View):
     async def btn_pronunciation(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_trick(interaction, "pronunciation")
 
+class JournalThreadView(View):
+    def __init__(self, user, level, original, corrected, thread):
+        super().__init__(timeout=None)
+        self.user = user
+        self.level = level
+        self.original = original
+        self.corrected = corrected
+        self.thread = thread
+        self.cached_responses = {} # Smart Cache to save API limits
+
+    async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
+        # Prevent other users from clicking the buttons
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ This is not your journal session!", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        if task_type in self.cached_responses:
+            response_text = self.cached_responses[task_type]
+        else:
+            if task_type == "translate":
+                prompt = f"Analyze these two Japanese texts. 1) Original: {self.original} 2) Corrected: {self.corrected}. Explain briefly how the original sounded (awkward/literal) versus how the corrected sentence sounds in natural English."
+            elif task_type == "reading":
+                prompt = f"Rewrite this Japanese text, adding furigana in square brackets exactly after EVERY Kanji used: {self.corrected}. Example format: 毎日 [まいにち] 漢字 [かんじ] を 勉強 [べんきょう] します。"
+            elif task_type == "vocab":
+                prompt = f"Extract key JLPT {self.level} vocabulary from this text: {self.corrected}. Provide the Kanji, reading (Romaji), and English meaning in a clean bulleted list."
+            
+            try:
+                response_text = await generate_gemini_response(prompt)
+                self.cached_responses[task_type] = response_text
+            except Exception as e:
+                return await interaction.followup.send(f"❌ API Error: {e}", ephemeral=True)
+
+        # Send the response INSIDE the thread cleanly
+        embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x9b59b6)
+        await self.thread.send(content=f"{interaction.user.mention}, here is your {task_type} analysis:", embed=embed)
+        await interaction.followup.send(f"✅ Sent to your thread: {self.thread.mention}", ephemeral=True)
+
+    @discord.ui.button(label="🇬🇧 Translate (Before/After)", style=discord.ButtonStyle.primary)
+    async def btn_trans(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "translate")
+
+    @discord.ui.button(label="📖 Reading Guide", style=discord.ButtonStyle.success)
+    async def btn_read(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "reading")
+
+    @discord.ui.button(label="🧠 Extract Words", style=discord.ButtonStyle.secondary)
+    async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "vocab")
+
+class JournalModal(discord.ui.Modal, title='Daily Japanese Journal'):
+    journal_input = discord.ui.TextInput(
+        label='Write your journal in Japanese...',
+        style=discord.TextStyle.paragraph,
+        placeholder='Type here (Max 4000 characters)...',
+        max_length=4000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
+        level_short = user_level_role.split(" ")[1] if user_level_role else "N5"
+        user_text = self.journal_input.value
+
+        # AI Prompt for smart level-based correction
+        prompt = f"""You are an expert Japanese Sensei. The user is currently at the JLPT {level_short} level.
+        Task: Correct their Japanese journal entry. Fix grammatical errors, unnatural phrasing, and particle mistakes.
+        CRITICAL RULE: Strictly limit the suggested vocabulary and grammar to the {level_short} level. Do not use overly advanced structures.
+        Output ONLY valid JSON with two keys: "corrected_text" (the fixed Japanese text) and "explanation" (a brief 1-2 sentence explanation of the main mistakes).
+        User's Text: {user_text}"""
+
+        try:
+            raw_text = await generate_gemini_response(prompt)
+            data = extract_json(raw_text)
+            if isinstance(data, list): data = data[0]
+            
+            corrected_text = data.get("corrected_text", "Correction failed.")
+            explanation = data.get("explanation", "No explanation provided.")
+
+            # Chunking Utility: Discord limits Embed Fields to 1024 characters.
+            embed = discord.Embed(title=f"📓 {interaction.user.display_name}'s Journal Analysis", color=0xf1c40f)
+            embed.add_field(name="❌ Original Input", value=user_text[:1024], inline=False)
+            embed.add_field(name="✅ Native Correction", value=corrected_text[:1024], inline=False)
+            embed.add_field(name="👨‍🏫 Sensei's Note", value=explanation[:1024], inline=False)
+            embed.set_footer(text=f"Level Restricted: {level_short}")
+
+            # Send to main channel, create thread, and attach buttons
+            msg = await interaction.channel.send(content=interaction.user.mention, embed=embed)
+            thread = await msg.create_thread(name=f"🧵 {interaction.user.display_name}'s Sensei Thread", auto_archive_duration=1440)
+            
+            view = JournalThreadView(interaction.user, level_short, user_text, corrected_text, thread)
+            await msg.edit(view=view)
+            
+            await interaction.followup.send("✅ Journal submitted successfully! Check the channel for your results.", ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to process journal: {e}", ephemeral=True)
+
+class PersistentJournalView(View):
+    def __init__(self):
+        super().__init__(timeout=None) # Never timeouts, always active
+
+    @discord.ui.button(label="📝 Submit Daily Journal", style=discord.ButtonStyle.primary, custom_id="premium_journal_btn")
+    async def submit_journal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+        if not has_pro:
+            embed = discord.Embed(
+                title="🔒 Premium Feature Unlocked", 
+                description="Oops! The **Guided Journaling & AI Sensei** feature is exclusively available for our **金 Pro Learners 金**.\n\nPractice output, get instant native corrections, and trigger the 'noticing' effect to skyrocket your Japanese fluency. Upgrade today to unlock unlimited personalized tutoring! ✨", 
+                color=0xf1c40f
+            )
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        await interaction.response.send_modal(JournalModal())
+
+
 # --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
     def __init__(self):
@@ -435,6 +552,7 @@ class NihongoBot(commands.Bot):
         self.daily_kanji_loop.start()
         self.freemium_dokkai_loop.start()
         self.add_view(WelcomeView())
+        self.add_view(PersistentJournalView()) 
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         self.add_view(view)
@@ -852,5 +970,17 @@ async def read(interaction: discord.Interaction, topic: str):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to generate story: {e}")
+
+@bot.tree.command(name="setupjournal", description="[Admin Only] Drop the Premium Journaling button in the current channel.")
+async def setup_journal(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied. Premium Feature setup command. Can be used by Senior Admins.", ephemeral=True)
+    
+    embed = discord.Embed(title="📓 Premium Guided Journaling", description="Welcome to your personal AI Sensei! Click the button below to submit your daily Japanese journal (Max 4000 chars).\n\nAI Sensei will evaluate your text against your current JLPT level, provide a native-sounding correction, and open a private thread for you to explore grammar, vocab, and reading guides.", color=0x3498db)
+    
+    await interaction.channel.send(embed=embed, view=PersistentJournalView())
+    await interaction.followup.send("✅ Journal button deployed successfully!", ephemeral=True)
 
 bot.run(os.environ.get("BOT_TOKEN"))
