@@ -58,10 +58,7 @@ def get_fallback_role(current_role_name):
 
 def extract_json(raw_text):
     try:
-        # 1. Clean markdown formatting
         cleaned = re.sub(r'```(?:json|JSON)?\s*(.*?)\s*```', r'\1', raw_text, flags=re.DOTALL).strip()
-        
-        # 2. Find potential bounds for both Array and Object
         possible_jsons = []
         
         start_a = cleaned.find('[')
@@ -77,32 +74,26 @@ def extract_json(raw_text):
         if not possible_jsons:
             raise ValueError("No JSON boundaries found.")
         
-        # 3. Sort by length (descending) to ALWAYS try the outermost block first!
-        # This completely ignores stray brackets in conversational text.
         possible_jsons.sort(key=len, reverse=True)
         
         for j_str in possible_jsons:
-            # Fix trailing commas (common AI mistake)
             j_str_fixed = re.sub(r',\s*([\]}])', r'\1', j_str)
             try:
-                # Try strict JSON parsing
                 return json.loads(j_str_fixed)
             except json.JSONDecodeError:
                 try:
-                    # Fallback to Python AST eval if JSON formatting is slightly off
                     safe_python_str = j_str_fixed.replace("null", "None").replace("true", "True").replace("false", "False")
                     return ast.literal_eval(safe_python_str)
                 except (SyntaxError, ValueError):
-                    continue # Try the next boundary if this one completely fails
+                    continue
                     
         raise ValueError("All parsing attempts failed.")
         
     except Exception as e:
         print(f"⚠️ JSON Parse Failed: {e}\nRaw AI Output:\n{raw_text}")
-        # Universal Fallback that protects both array-based (/quiz) and dict-based (/scenario) features from crashing the bot
         return [{"question": "AI Formatting Error", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
-# --- 🧠 DIRECT GEMINI REST API (WITH EXPONENTIAL BACKOFF) ---
+# --- 🧠 DIRECT GEMINI REST API ---
 async def generate_gemini_response(prompt):
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key: 
@@ -120,9 +111,7 @@ async def generate_gemini_response(prompt):
     }
     headers = {"Content-Type": "application/json"}
     
-    # Exponential Backoff Logic: Wait 1s, 2s, 4s, 8s on HTTP 429
     backoff_times = [1, 2, 4, 8]
-    
     async with aiohttp.ClientSession() as session:
         for attempt, wait_time in enumerate(backoff_times + [0]):
             async with session.post(url, json=payload, headers=headers) as resp:
@@ -246,7 +235,7 @@ class QuizView(View):
 
 class StoryReaderView(View):
     def __init__(self, user, level, story_content):
-        super().__init__(timeout=None) # No timeout so they can read at their own pace
+        super().__init__(timeout=None)
         self.user = user
         self.level = level
         self.story_content = story_content
@@ -255,7 +244,6 @@ class StoryReaderView(View):
         if interaction.user.id != self.user.id:
             return await interaction.response.send_message("❌ This is not your reading session!", ephemeral=True)
         
-        # Defer immediately to avoid Discord's 3-second interaction deadline
         await interaction.response.defer(ephemeral=True)
         
         prompts = {
@@ -283,12 +271,10 @@ class StoryReaderView(View):
     async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_analysis(interaction, "vocab")
 
-class FreemiumStoryView(View):
-    def __init__(self, level, story_content):
+# --- 🟢 NEW: PERSISTENT VIEWS (Fixes Restart Dead Buttons) ---
+class PersistentFreemiumStoryView(View):
+    def __init__(self):
         super().__init__(timeout=None) 
-        self.level = level
-        self.story_content = story_content
-        # 🧠 SMART CACHE: Saves API hits!
         self.cached_responses = {}
 
     async def check_premium(self, interaction: discord.Interaction):
@@ -306,62 +292,71 @@ class FreemiumStoryView(View):
     async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
         await interaction.response.defer(ephemeral=True)
         
-        # 🚀 CACHE CHECK: Agar pehle se generated hai, toh bina API hit kiye serve karo
-        if task_type in self.cached_responses:
-            response_text = self.cached_responses[task_type]
+        # Reads the story content directly from the existing Discord message!
+        embed_data = interaction.message.embeds[0]
+        story_content = embed_data.description
+        footer_text = embed_data.footer.text
+        level = footer_text.split(" | ")[0].replace("Level: ", "")
+        
+        cache_key = f"{interaction.message.id}_{task_type}"
+        
+        if cache_key in self.cached_responses:
+            response_text = self.cached_responses[cache_key]
         else:
-            # Agar generate nahi hua hai, toh hi API ko request bhejo
             prompts = {
-                "translate": f"Translate this Japanese story to English naturally:\n\n{self.story_content}",
-                "grammar": f"Analyze the key JLPT {self.level} grammar points used in this story. Explain them simply:\n\n{self.story_content}",
-                "vocab": f"Extract the key JLPT {self.level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{self.story_content}"
+                "translate": f"Translate this Japanese story to English naturally:\n\n{story_content}",
+                "grammar": f"Analyze the key JLPT {level} grammar points used in this story. Explain them simply:\n\n{story_content}",
+                "vocab": f"Extract the key JLPT {level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{story_content}"
             }
             try:
                 response_text = await generate_gemini_response(prompts[task_type])
-                # Answer aane ke baad usko cache mein save kar lo
-                self.cached_responses[task_type] = response_text 
+                self.cached_responses[cache_key] = response_text 
             except Exception as e:
                 return await interaction.followup.send(f"❌ Analysis failed: {e}", ephemeral=True)
 
         embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x2ecc71)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="🇬🇧 Translate (Free)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🇬🇧 Translate (Free)", style=discord.ButtonStyle.primary, custom_id="freemium_trans")
     async def btn_translate(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_analysis(interaction, "translate")
 
-    @discord.ui.button(label="🧠 Analyze Grammar (Pro)", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="🧠 Analyze Grammar (Pro)", style=discord.ButtonStyle.success, custom_id="freemium_gram")
     async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_premium(interaction):
             await self.handle_analysis(interaction, "grammar")
 
-    @discord.ui.button(label="📖 Extract Vocab (Pro)", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="📖 Extract Vocab (Pro)", style=discord.ButtonStyle.secondary, custom_id="freemium_voc")
     async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_premium(interaction):
             await self.handle_analysis(interaction, "vocab")
 
-class DailyKanjiView(View):
-    def __init__(self, kanji_str, level):
+class PersistentDailyKanjiView(View):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.kanji_str = kanji_str
-        self.level = level
-        # 🧠 SMART CACHE: Saves API hits when multiple users click the tricks
         self.cached_responses = {}
 
     async def handle_trick(self, interaction: discord.Interaction, trick_type: str):
         await interaction.response.defer(ephemeral=True)
         
-        if trick_type in self.cached_responses:
-            response_text = self.cached_responses[trick_type]
+        embed_data = interaction.message.embeds[0]
+        footer_text = embed_data.footer.text
+        kanji_str = footer_text.split(" | ")[0].replace("Kanji: ", "")
+        level = footer_text.split(" | ")[1].replace("Level: ", "")
+        
+        cache_key = f"{interaction.message.id}_{trick_type}"
+
+        if cache_key in self.cached_responses:
+            response_text = self.cached_responses[cache_key]
         else:
             if trick_type == "visual":
-                prompt = f"Create a short, logical visual memory trick to remember the shape of these JLPT {self.level} Kanji(s): {self.kanji_str}. Format cleanly in English. The logical memory trick should be related to daily surroundings."
+                prompt = f"Create a short, logical visual memory trick to remember the shape of these JLPT {level} Kanji(s): {kanji_str}. Format cleanly in English."
             else:
-                prompt = f"Create a short, logical pronunciation trick to remember the Onyomi/Kunyomi reading of these JLPT {self.level} Kanji(s): {self.kanji_str}. Format cleanly in English. The logical memory trick should be related to daily surroundings."
+                prompt = f"Create a short, logical pronunciation trick to remember the Onyomi/Kunyomi reading of these JLPT {level} Kanji(s): {kanji_str}. Format cleanly in English."
             
             try:
                 response_text = await generate_gemini_response(prompt)
-                self.cached_responses[trick_type] = response_text
+                self.cached_responses[cache_key] = response_text
             except Exception as e:
                 return await interaction.followup.send(f"❌ Failed to fetch trick: {e}", ephemeral=True)
 
@@ -372,11 +367,11 @@ class DailyKanjiView(View):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="🧠 Visual Memory Trick", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🧠 Visual Memory Trick", style=discord.ButtonStyle.primary, custom_id="kanji_visual")
     async def btn_visual(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_trick(interaction, "visual")
 
-    @discord.ui.button(label="🗣️ Pronunciation Trick", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="🗣️ Pronunciation Trick", style=discord.ButtonStyle.success, custom_id="kanji_pronounce")
     async def btn_pronunciation(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_trick(interaction, "pronunciation")
 
@@ -388,10 +383,9 @@ class JournalThreadView(View):
         self.original = original
         self.corrected = corrected
         self.thread = thread
-        self.cached_responses = {} # Smart Cache to save API limits
+        self.cached_responses = {} 
 
     async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
-        # Prevent other users from clicking the buttons
         if interaction.user.id != self.user.id:
             return await interaction.response.send_message("❌ This is not your journal session!", ephemeral=True)
         
@@ -413,7 +407,6 @@ class JournalThreadView(View):
             except Exception as e:
                 return await interaction.followup.send(f"❌ API Error: {e}", ephemeral=True)
 
-        # Send the response INSIDE the thread cleanly
         embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x9b59b6)
         await self.thread.send(content=f"{interaction.user.mention}, here is your {task_type} analysis:", embed=embed)
         await interaction.followup.send(f"✅ Sent to your thread: {self.thread.mention}", ephemeral=True)
@@ -445,7 +438,6 @@ class JournalModal(discord.ui.Modal, title='Daily Japanese Journal'):
         level_short = user_level_role.split(" ")[1] if user_level_role else "N5"
         user_text = self.journal_input.value
 
-        # AI Prompt for smart level-based correction
         prompt = f"""You are an expert Japanese Sensei. The user is currently at the JLPT {level_short} level.
         Task: Correct their Japanese journal entry. Fix grammatical errors, unnatural phrasing, and particle mistakes.
         CRITICAL RULE: Strictly limit the suggested vocabulary and grammar to the {level_short} level. Do not use overly advanced structures.
@@ -460,14 +452,12 @@ class JournalModal(discord.ui.Modal, title='Daily Japanese Journal'):
             corrected_text = data.get("corrected_text", "Correction failed.")
             explanation = data.get("explanation", "No explanation provided.")
 
-            # Chunking Utility: Discord limits Embed Fields to 1024 characters.
             embed = discord.Embed(title=f"📓 {interaction.user.display_name}'s Journal Analysis", color=0xf1c40f)
             embed.add_field(name="❌ Original Input", value=user_text[:1024], inline=False)
             embed.add_field(name="✅ Native Correction", value=corrected_text[:1024], inline=False)
             embed.add_field(name="👨‍🏫 Sensei's Note", value=explanation[:1024], inline=False)
             embed.set_footer(text=f"Level Restricted: {level_short}")
 
-            # Send to main channel, create thread, and attach buttons
             msg = await interaction.channel.send(content=interaction.user.mention, embed=embed)
             thread = await msg.create_thread(name=f"🧵 {interaction.user.display_name}'s Sensei Thread", auto_archive_duration=1440)
             
@@ -481,7 +471,7 @@ class JournalModal(discord.ui.Modal, title='Daily Japanese Journal'):
 
 class PersistentJournalView(View):
     def __init__(self):
-        super().__init__(timeout=None) # Never timeouts, always active
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="📝 Submit Daily Journal", style=discord.ButtonStyle.primary, custom_id="premium_journal_btn")
     async def submit_journal(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -496,47 +486,7 @@ class PersistentJournalView(View):
         
         await interaction.response.send_modal(JournalModal())
 
-class ScenarioSelect(Select):
-    def __init__(self, options_data):
-        self.options_data = options_data
-        select_options = []
-        for idx, opt in enumerate(options_data):
-            label = opt['label'][:100]
-            select_options.append(discord.SelectOption(label=label, value=str(idx), emoji="💬"))
-        super().__init__(placeholder="Select the most natural Japanese response...", min_values=1, max_values=1, options=select_options)
-
-    async def callback(self, interaction: discord.Interaction):
-        # 1. Ephemeral defer ensures the explanation is private to the user clicking it
-        await interaction.response.defer(ephemeral=True)
-
-        # 2. Check if the interacting user is a Pro Learner
-        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
-        if not has_pro:
-            return await interaction.followup.send("❌ You need the **金 Pro Learners 金** role to answer Scenario Drills!", ephemeral=True)
-
-        selected_idx = int(self.values[0])
-        selected_opt = self.options_data[selected_idx]
-        
-        is_correct = selected_opt.get("is_correct", False)
-        status_emoji = "✅ Correct!" if is_correct else "❌ Incorrect!"
-        color = 0x2ecc71 if is_correct else 0xe74c3c
-
-        # 3. Build the detailed breakdown embed
-        embed = discord.Embed(title=f"{status_emoji} Detailed Breakdown", color=color)
-        
-        # Show their specific choice
-        embed.add_field(name="Your Choice", value=f"**{selected_opt['label']}**\n{selected_opt['explanation']}", inline=False)
-        
-        # Show explanations for ALL options so they learn the nuance
-        all_exp = ""
-        for opt in self.options_data:
-            mark = "✅" if opt.get("is_correct") else "❌"
-            all_exp += f"{mark} **{opt['label']}**\n{opt['explanation']}\n\n"
-        
-        embed.add_field(name="All Options Analyzed", value=all_exp[:1024], inline=False)
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
+# --- REMOVED DUPLICATE SCENARIO SELECT ---
 class ScenarioSelect(Select):
     def __init__(self, options_data):
         self.options_data = options_data
@@ -544,7 +494,6 @@ class ScenarioSelect(Select):
         emojis = ["🇦", "🇧", "🇨", "🇩"]
         
         for idx, opt in enumerate(options_data):
-            # Dropdown will now show "Option A", "Option B", etc. nicely
             label_name = f"Option {chr(65+idx)}" 
             select_options.append(discord.SelectOption(label=label_name, value=str(idx), emoji=emojis[idx]))
             
@@ -566,7 +515,6 @@ class ScenarioSelect(Select):
 
         embed = discord.Embed(title=f"{status_emoji} Detailed Breakdown", color=color)
         
-        # Shows the full Japanese string they chose
         embed.add_field(name="Your Choice", value=f"**{selected_opt['label']}**\n{selected_opt['explanation']}", inline=False)
         
         all_exp = ""
@@ -597,7 +545,7 @@ class JLPTSelect(Select):
         await interaction.response.send_message(f"⏳ Generating a 1-question placement test for {level_short}...", ephemeral=True)
         
         prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {level_short} (Grammar or Vocab). Always shuffle the options.
-        1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading, without any images or audio (e.g., "雨が降っているので、___をさします。" -> Answer: かさ).
+        1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading, without any images or audio.
         2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
         3. Must have exactly ONE blank represented by '___'.
         4. Ensure high-quality, natural Japanese.
@@ -649,7 +597,9 @@ class NihongoBot(commands.Bot):
         self.daily_kanji_loop.start()
         self.freemium_dokkai_loop.start()
         self.add_view(WelcomeView())
-        self.add_view(PersistentJournalView()) 
+        self.add_view(PersistentJournalView())
+        self.add_view(PersistentFreemiumStoryView()) # 🟢 REGISTERED DOKKAI
+        self.add_view(PersistentDailyKanjiView())    # 🟢 REGISTERED KANJI
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         self.add_view(view)
@@ -667,7 +617,6 @@ class NihongoBot(commands.Bot):
     async def weekly_leaderboard_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
         
-        # --- 1. MORNING HYPE ANNOUNCEMENT (Sunday 10:00 AM JST) - ALL IN ENGLISH ---
         if now_jst.weekday() == 6 and now_jst.hour == 10 and now_jst.minute == 0:
             if not getattr(self, 'morning_hype_done', False):
                 self.morning_hype_done = True
@@ -690,7 +639,6 @@ class NihongoBot(commands.Bot):
         elif now_jst.weekday() == 6 and now_jst.hour == 10 and now_jst.minute == 1:
             self.morning_hype_done = False
 
-        # --- 2. NIGHTLY AUTO-ANNOUNCEMENT (Sunday 10:00 PM JST) ---
         if now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 0:
             if not getattr(self, 'night_announce_done', False):
                 self.night_announce_done = True
@@ -720,7 +668,6 @@ class NihongoBot(commands.Bot):
         elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 1:
             self.night_announce_done = False
             
-            # --- 3. DATABASE PURGE EXACTLY AT 10:01 PM JST ---
             if not getattr(self, 'weekly_reset_done', False):
                 self.weekly_reset_done = True
                 quiz_db.delete_many({}) 
@@ -733,7 +680,6 @@ class NihongoBot(commands.Bot):
     async def daily_kanji_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
         
-        # Trigger at exactly 9:00 AM JST
         if now_jst.hour == 9 and now_jst.minute == 0:
             if not getattr(self, 'daily_kanji_done', False):
                 self.daily_kanji_done = True
@@ -742,7 +688,6 @@ class NihongoBot(commands.Bot):
             self.daily_kanji_done = False
 
     async def drop_kanjis_task(self):
-        # Format: (Level Name, Kanji List, Drop Count, Channel Name Keyword)
         level_configs = [
             ("N5", N5_KANJI, 1, "n5-daily-kanji"),
             ("N4", N4_KANJI, 1, "n4-daily-kanji"),
@@ -771,7 +716,6 @@ class NihongoBot(commands.Bot):
 
                 new_kanjis = kanji_list[current_index : current_index + drop_count]
                 
-                # Fix for edge case at the end of the list
                 if not new_kanjis: 
                     current_index = 0
                     new_kanjis = kanji_list[current_index : current_index + drop_count]
@@ -780,7 +724,6 @@ class NihongoBot(commands.Bot):
                 kanji_db.update_one({"level": lvl_name}, {"$set": {"current_index": next_index}}, upsert=True)
 
                 kanji_str = ", ".join(new_kanjis)
-                # Optimized prompt: Asks strictly for basic info to prevent AI overload
                 prompt = f"""You are an expert Japanese Sensei. Explain ALL of the following {len(new_kanjis)} Kanji(s): {kanji_str}.
                 For EACH Kanji, strictly provide:
                 1. Meaning
@@ -793,49 +736,43 @@ class NihongoBot(commands.Bot):
                     
                     rev_text = f"**🔄 Yesterday's Revision:** {', '.join(revision_kanjis)}\n\n" if revision_kanjis else ""
                     
-                    # Embedding the text easily bypasses the 2000 char message limit
                     embed = discord.Embed(
                         title=f"㊗️ {lvl_name} Daily Kanji Drop!",
                         description=f"{rev_text}{explanation}"[:4096],
                         color=0xe74c3c
                     )
+                    # 🟢 NEW: Store data in Footer to keep it persistent across restarts!
+                    embed.set_footer(text=f"Kanji: {kanji_str} | Level: {lvl_name}")
                     
-                    # Attach the cached buttons View
-                    view = DailyKanjiView(kanji_str, lvl_name)
+                    view = PersistentDailyKanjiView()
                     await channel.send(embed=embed, view=view)
 
                 except Exception as e:
                     print(f"❌ Error dropping {lvl_name} Kanji: {e}")
-                #Sleep for 5 seconds in between to prevent hitting discord API limit
                 await asyncio.sleep(5)
 
     @tasks.loop(minutes=1)
     async def freemium_dokkai_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
         
-        # Initialize next drop time if it doesn't exist
         if not hasattr(self, 'next_dokkai_drop'):
-            random_hour = random.randint(10, 20) # Random hour between 10 AM and 8 PM
+            random_hour = random.randint(10, 20) 
             random_minute = random.randint(0, 59)
             self.next_dokkai_drop = now_jst.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
             
-            # If the random time today has already passed, schedule for tomorrow
             if now_jst >= self.next_dokkai_drop:
                 tomorrow = now_jst + timedelta(days=1)
                 self.next_dokkai_drop = tomorrow.replace(hour=random.randint(10, 20), minute=random.randint(0, 59))
 
-        # Check if it's time to drop
         if now_jst >= self.next_dokkai_drop:
             await self.drop_freemium_dokkai_task()
             
-            # Setup the next random drop for tomorrow
             tomorrow = now_jst + timedelta(days=1)
             random_hour = random.randint(10, 20)
             random_minute = random.randint(0, 59)
             self.next_dokkai_drop = tomorrow.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
 
     async def drop_freemium_dokkai_task(self):
-        # A list of random interesting topics for the daily drop
         topics = ["Japanese Culture", "A Sci-Fi Adventure", "A Slice of Life moment", "A Mystery", "Japanese Food", "Folklore", "School Life"]
         topic = random.choice(topics)
         
@@ -872,16 +809,14 @@ class NihongoBot(commands.Bot):
                     embed = discord.Embed(title=f"🎁 Daily Free Reading: {title}", description=content, color=0x3498db)
                     embed.set_footer(text=f"Level: {lvl_name} | Topic: {topic}")
                     
-                    # We pass the content into the Freemium-specific UI
-                    view = FreemiumStoryView(lvl_name, content)
+                    # 🟢 NEW: Use the Persistent View instead of temporary memory
+                    view = PersistentFreemiumStoryView()
                     await channel.send(embed=embed, view=view)
                     
                 except Exception as e:
                     print(f"❌ Error dropping {lvl_name} Dokkai: {e}")
                     
-                # 5-second sleep to handle limits gracefully
                 await asyncio.sleep(5)
-
 
 bot = NihongoBot()
 
@@ -894,24 +829,19 @@ async def help_command(interaction: discord.Interaction):
 @bot.tree.command(name="leaderboard", description="[Admin Only] Check the Top 5 performing players for a specific level.")
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
 async def leaderboard(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
-    # 1. Setting response to Ephemeral (Private)
     await interaction.response.defer(ephemeral=True)
     
-    # 2. Permission Check
     has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
     if not has_permission:
         return await interaction.followup.send("❌ Access Denied: You need `セィニア・アデュミン` or `ファウンダ` role to use this.", ephemeral=True)
     
     level_full_name = target_level.value
-    
-    # 3. Fetching strictly Top 5
     top_scorers = quiz_db.find({"level": level_full_name}).sort([("score", -1), ("time_taken", 1)]).limit(5)
     scorers_list = list(top_scorers)
     
     if not scorers_list:
         return await interaction.followup.send(f"⚠️ No data found for {level_full_name} this week.", ephemeral=True)
         
-    # 4. Creating the Embed
     embed = discord.Embed(title=f"🏆 Top 5 Leaderboard: {level_full_name}", color=0xf1c40f)
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     for idx, user_data in enumerate(scorers_list):
@@ -935,15 +865,14 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
     await interaction.followup.send(f"⏳ Generating test for {lvl_short}...", ephemeral=True)
     
     prompt = f"""You are an expert JLPT Examiner. Generate exactly 1 multiple-choice question for JLPT {lvl_short} (Grammar/Vocab). Difficulty: Medium.
-    1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading, without any images or audio (e.g., "雨が降っているので、___をさします。" -> Answer: かさ).
+    1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading, without any images or audio.
     2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
     3. Each question MUST have exactly one blank space represented by '___'.
     4. When using kanjis write furigana in ([]) square brackets just after the word ends.
     5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically. Always shuffle the options for each question.
     6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
     
-    Output ONLY a valid JSON array of 1 objects. DO NOT output any other text or markdown outside the JSON array. Example:
-    [{{"question": "外は寒いので、___を着てください。", "options": {{"A": "コート", "B": "かばん", "C": "めがね", "D": "くつ"}}, "answer": "A"}}]"""
+    Output ONLY a valid JSON array of 1 objects. DO NOT output any other text or markdown outside the JSON array."""
     
     try:
         raw_text = await generate_gemini_response(prompt)
@@ -969,15 +898,14 @@ async def quiz(interaction: discord.Interaction, furigana: app_commands.Choice[s
     
     prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab).
     Strict Rules:
-    1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading, without any images or audio (e.g., "雨が降っているので、___をさします。" -> Answer: かさ).
+    1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading.
     2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
     3. Each question MUST have exactly one blank space represented by '___'.
     4. {furigana_rule}
-    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically. Always shuffle the options for each question.
+    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically. Always shuffle the options.
     6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
     
-    Output ONLY a valid JSON array of 20 objects. DO NOT output any other text or markdown outside the JSON array. Example:
-    [{{"question": "外は寒いので、___を着てください。", "options": {{"A": "コート", "B": "かばん", "C": "めがね", "D": "くつ"}}, "answer": "A"}}]"""
+    Output ONLY a valid JSON array of 20 objects. DO NOT output any other text or markdown outside the JSON array."""
     
     try:
         raw_text = await generate_gemini_response(prompt)
@@ -993,13 +921,11 @@ async def quiz(interaction: discord.Interaction, furigana: app_commands.Choice[s
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
 async def leaderboard_announce(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
     await interaction.response.defer(ephemeral=True)
-    
     has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
     if not has_permission:
         return await interaction.followup.send("❌ Access Denied: You need `セィニア・アデュミン` or `ファウンダ` role to use this.", ephemeral=True)
     
     level_full_name = target_level.value
-    
     top_scorers = quiz_db.find({"level": level_full_name}).sort([("score", -1), ("time_taken", 1)]).limit(5)
     scorers_list = list(top_scorers)
     
@@ -1020,7 +946,6 @@ async def leaderboard_announce(interaction: discord.Interaction, target_level: a
 @bot.tree.command(name="read", description="[Premium] Generate a personalized Japanese short story based on your JLPT level.")
 @app_commands.describe(topic="What should the story be about? (e.g., Cyberpunk, Romance, Tokyo Trip)")
 async def read(interaction: discord.Interaction, topic: str):
-    # 1. Premium Gating (Role Check)
     has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
     if not has_pro:
         embed = discord.Embed(
@@ -1030,17 +955,13 @@ async def read(interaction: discord.Interaction, topic: str):
         )
         return await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # 2. Dynamic Level Detection
     user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
     if not user_level_role:
         return await interaction.response.send_message("❌ Please select a JLPT level first using the welcome channel or `/changerole`.", ephemeral=True)
     
-    level_short = user_level_role.split(" ")[1] # Extracts "N5", "N4", etc.
-
-    # 3. Defer Response (Avoids 3-second limit while AI thinks)
+    level_short = user_level_role.split(" ")[1] 
     await interaction.response.defer(ephemeral=False) 
 
-    # 4. Deep Research Driven Prompt
     prompt = f"""You are an expert Japanese linguist and JLPT examiner.
     Task: Generate a short narrative (max 300 Japanese characters) about '{topic}'.
     Constraint 1: Strictly use ONLY mix of vocabulary and grammar points from JLPT levels N5 up to {level_short}.
@@ -1050,15 +971,12 @@ async def read(interaction: discord.Interaction, topic: str):
     try:
         raw_text = await generate_gemini_response(prompt)
         story_data = extract_json(raw_text)
-        
-        # Handle cases where extract_json returns a list containing the dict
         if isinstance(story_data, list):
             story_data = story_data[0]
 
         title = story_data.get("title", f"{level_short} Story")
         content = story_data.get("story_content", "Could not generate story.")
 
-        # Embed perfectly fits the limits
         embed = discord.Embed(title=f"🎌 {title}", description=content, color=0x9b59b6)
         embed.set_footer(text=f"Level: {level_short} | Topic: {topic}")
         
@@ -1094,7 +1012,6 @@ async def scenario(interaction: discord.Interaction):
         return await interaction.response.send_message(embed=embed, ephemeral=True)
     
     await interaction.response.defer(ephemeral=True) 
-    
     user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
     level_short = user_level_role.split(" ")[1] if user_level_role else "N3"
 
@@ -1129,7 +1046,6 @@ async def scenario(interaction: discord.Interaction):
         if not options_data:
             raise ValueError("No options generated.")
             
-        # 🟢 NEW: Format the Japanese options to show fully inside the Embed
         options_display = ""
         emojis = ["🇦", "🇧", "🇨", "🇩"]
         for idx, opt in enumerate(options_data):
@@ -1145,5 +1061,13 @@ async def scenario(interaction: discord.Interaction):
         
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to generate scenario: {e}", ephemeral=True)
+
+@bot.tree.command(name="resetkanji", description="[Admin] Reset Daily Kanji tracker.")
+async def reset_kanji(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not any(r.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for r in interaction.user.roles): 
+        return await interaction.followup.send("❌ Denied.", ephemeral=True)
+    kanji_db.delete_many({})
+    await interaction.followup.send("✅ Kanji tracker reset to Day 1.", ephemeral=True)
 
 bot.run(os.environ.get("BOT_TOKEN"))
