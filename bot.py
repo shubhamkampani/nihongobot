@@ -329,6 +329,46 @@ class FreemiumStoryView(View):
         if await self.check_premium(interaction):
             await self.handle_analysis(interaction, "vocab")
 
+class DailyKanjiView(View):
+    def __init__(self, kanji_str, level):
+        super().__init__(timeout=None)
+        self.kanji_str = kanji_str
+        self.level = level
+        # 🧠 SMART CACHE: Saves API hits when multiple users click the tricks
+        self.cached_responses = {}
+
+    async def handle_trick(self, interaction: discord.Interaction, trick_type: str):
+        await interaction.response.defer(ephemeral=True)
+        
+        if trick_type in self.cached_responses:
+            response_text = self.cached_responses[trick_type]
+        else:
+            if trick_type == "visual":
+                prompt = f"Create a short, logical visual memory trick to remember the shape of these JLPT {self.level} Kanji(s): {self.kanji_str}. Format cleanly in English. The logical memory trick should be related to daily surroundings."
+            else:
+                prompt = f"Create a short, logical pronunciation trick to remember the Onyomi/Kunyomi reading of these JLPT {self.level} Kanji(s): {self.kanji_str}. Format cleanly in English. The logical memory trick should be related to daily surroundings."
+            
+            try:
+                response_text = await generate_gemini_response(prompt)
+                self.cached_responses[trick_type] = response_text
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Failed to fetch trick: {e}", ephemeral=True)
+
+        embed = discord.Embed(
+            title=f"💡 {'Visual Memory' if trick_type == 'visual' else 'Pronunciation'} Trick", 
+            description=response_text[:4000], 
+            color=0xf1c40f
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🧠 Visual Memory Trick", style=discord.ButtonStyle.primary)
+    async def btn_visual(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_trick(interaction, "visual")
+
+    @discord.ui.button(label="🗣️ Pronunciation Trick", style=discord.ButtonStyle.success)
+    async def btn_pronunciation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_trick(interaction, "pronunciation")
+
 # --- 🌸 ONBOARDING UI ---
 class JLPTSelect(Select):
     def __init__(self):
@@ -502,58 +542,56 @@ class NihongoBot(commands.Bot):
                 if not channel: 
                     continue
 
-                # 1. Fetch current index from MongoDB
                 data = kanji_db.find_one({"level": lvl_name})
                 current_index = data["current_index"] if data else 0
 
-                # 2. Cycle Restart Logic (If syllabus is complete)
                 if current_index >= len(kanji_list):
                     current_index = 0
                 
-                # 3. Fetch Revision Kanjis (Yesterday's Kanjis)
                 revision_kanjis = []
                 if current_index >= drop_count:
                     revision_kanjis = kanji_list[current_index - drop_count : current_index]
                 elif current_index > 0:
                     revision_kanjis = kanji_list[0 : current_index]
 
-                # 4. Fetch New Kanjis for Today
                 new_kanjis = kanji_list[current_index : current_index + drop_count]
                 
-                # Edge case if list runs out right at the end
+                # Fix for edge case at the end of the list
                 if not new_kanjis: 
                     current_index = 0
                     new_kanjis = kanji_list[current_index : current_index + drop_count]
 
-                # 5. Update MongoDB index for tomorrow
                 next_index = current_index + len(new_kanjis)
                 kanji_db.update_one({"level": lvl_name}, {"$set": {"current_index": next_index}}, upsert=True)
 
-                # 6. Prompt Gemini for explanation
                 kanji_str = ", ".join(new_kanjis)
-                prompt = f"""You are an expert Japanese Sensei. Explain the following {len(new_kanjis)} Kanji(s): {kanji_str}.
+                # Optimized prompt: Asks strictly for basic info to prevent AI overload
+                prompt = f"""You are an expert Japanese Sensei. Explain ALL of the following {len(new_kanjis)} Kanji(s): {kanji_str}.
                 For EACH Kanji, strictly provide:
                 1. Meaning
                 2. Onyomi & Kunyomi (with Romaji)
-                3. One example of each kanji in a word with Onyomi & Kunyomi pronounciation being used (with romaji).
-                3. A short visual memory trick to remember the Kanji shape. Should be logical and naturally present in surroundings.
-                4. A short pronunciation trick to remember the reading. Should be logical and naturally present.
-                Format the entire response beautifully in Discord Markdown using headings, bold text, and bullet points. Keep the script entirely in English. Do NOT use JSON."""
+                3. One example of each kanji in a word with Onyomi & Kunyomi pronunciation being used (with romaji).
+                Format the entire response beautifully in Discord Markdown using headings and bullet points. Keep the script entirely in English. Do NOT include memory or pronunciation tricks."""
                 
                 try:
                     explanation = await generate_gemini_response(prompt)
                     
-                    # 7. Construct and send the Discord Message
                     rev_text = f"**🔄 Yesterday's Revision:** {', '.join(revision_kanjis)}\n\n" if revision_kanjis else ""
-                    header = f"## ㊗️ {lvl_name} Daily Kanji Drop!\n{rev_text}"
                     
-                    # Sending header and AI explanation
-                    await channel.send(f"{header}{explanation}")
+                    # Embedding the text easily bypasses the 2000 char message limit
+                    embed = discord.Embed(
+                        title=f"㊗️ {lvl_name} Daily Kanji Drop!",
+                        description=f"{rev_text}{explanation}"[:4096],
+                        color=0xe74c3c
+                    )
+                    
+                    # Attach the cached buttons View
+                    view = DailyKanjiView(kanji_str, lvl_name)
+                    await channel.send(embed=embed, view=view)
 
                 except Exception as e:
                     print(f"❌ Error dropping {lvl_name} Kanji: {e}")
-                
-                # Sleep for 5 seconds between each level to prevent API/Discord Rate Limits
+                #Sleep for 5 seconds in between to prevent hitting discord API limit
                 await asyncio.sleep(5)
 
     @tasks.loop(minutes=1)
