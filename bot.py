@@ -287,7 +287,7 @@ class PersistentFreemiumStoryView(View):
         has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
         if not has_pro:
             embed = discord.Embed(
-                title="🔒 Premium Feature Unlocked", 
+                title="🔒 Premium Feature Locked", 
                 description="Oops! Grammar and Vocab analysis are exclusively available for our **金 Pro Learners 金**.\n\nUnlock the full potential of your Japanese journey with unlimited personalized AI stories, deep grammar analysis, and much more! Upgrade today to access this and other pro tools. ✨", 
                 color=0xf1c40f
             )
@@ -659,7 +659,7 @@ class JLPTSelect(Select):
         2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
         3. Must have exactly ONE blank represented by '___'.
         4. Ensure high-quality, natural Japanese.
-        5. Ensure furigana of kanjis used, should be written in ([]) square brackets just after kanji used.
+        5. Ensure furigana of kanjis used, should be written in ([]) square brackets just after kanji used. The difficulty level of question on a scale of 1-5 should not be more than 2.
         6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
         Output ONLY a valid JSON array format exactly like this:
         [{{"question": "りんごを ___ 買いました。", "options": {{"A": "みっつ", "B": "みつ", "C": "さん", "D": "さんこ"}}, "answer": "A"}}]"""
@@ -706,7 +706,7 @@ class WelcomeView(View):
         1. CONTEXT-RICH TEXT ONLY: No images or audio.
         2. Must have exactly ONE blank represented by '___'.
         3. Ensure high-quality, natural Japanese.
-        4. Do NOT provide furigana for this level, let it be difficult as question is being asked from native japnese for verification.
+        4. Do NOT provide furigana for this level, The difficulty level of question on a scale of 1-5 should not be less than 4.
         5. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
         Output ONLY a valid JSON array format exactly like this:
         [{"question": "...", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, "answer": "A"}]"""
