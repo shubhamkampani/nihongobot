@@ -271,7 +271,7 @@ class StoryReaderView(View):
     async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_analysis(interaction, "vocab")
 
-# --- 🟢 NEW: PERSISTENT VIEWS (Fixes Restart Dead Buttons) ---
+# --- 🟢 PERSISTENT VIEWS (Fixes Restart Dead Buttons) ---
 class PersistentFreemiumStoryView(View):
     def __init__(self):
         super().__init__(timeout=None) 
@@ -486,7 +486,6 @@ class PersistentJournalView(View):
         
         await interaction.response.send_modal(JournalModal())
 
-# --- REMOVED DUPLICATE SCENARIO SELECT ---
 class ScenarioSelect(Select):
     def __init__(self, options_data):
         self.options_data = options_data
@@ -598,8 +597,8 @@ class NihongoBot(commands.Bot):
         self.freemium_dokkai_loop.start()
         self.add_view(WelcomeView())
         self.add_view(PersistentJournalView())
-        self.add_view(PersistentFreemiumStoryView()) # 🟢 REGISTERED DOKKAI
-        self.add_view(PersistentDailyKanjiView())    # 🟢 REGISTERED KANJI
+        self.add_view(PersistentFreemiumStoryView()) 
+        self.add_view(PersistentDailyKanjiView())    
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         self.add_view(view)
@@ -741,7 +740,6 @@ class NihongoBot(commands.Bot):
                         description=f"{rev_text}{explanation}"[:4096],
                         color=0xe74c3c
                     )
-                    # 🟢 NEW: Store data in Footer to keep it persistent across restarts!
                     embed.set_footer(text=f"Kanji: {kanji_str} | Level: {lvl_name}")
                     
                     view = PersistentDailyKanjiView()
@@ -755,22 +753,13 @@ class NihongoBot(commands.Bot):
     async def freemium_dokkai_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
         
-        if not hasattr(self, 'next_dokkai_drop'):
-            random_hour = random.randint(10, 20) 
-            random_minute = random.randint(0, 59)
-            self.next_dokkai_drop = now_jst.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
-            
-            if now_jst >= self.next_dokkai_drop:
-                tomorrow = now_jst + timedelta(days=1)
-                self.next_dokkai_drop = tomorrow.replace(hour=random.randint(10, 20), minute=random.randint(0, 59))
-
-        if now_jst >= self.next_dokkai_drop:
-            await self.drop_freemium_dokkai_task()
-            
-            tomorrow = now_jst + timedelta(days=1)
-            random_hour = random.randint(10, 20)
-            random_minute = random.randint(0, 59)
-            self.next_dokkai_drop = tomorrow.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
+        # 🟢 NEW: Fixed exactly at 6:00 PM (18:00) JST to prevent restart spam
+        if now_jst.hour == 18 and now_jst.minute == 0:
+            if not getattr(self, 'daily_dokkai_done', False):
+                self.daily_dokkai_done = True
+                await self.drop_freemium_dokkai_task()
+        elif now_jst.hour == 18 and now_jst.minute == 1:
+            self.daily_dokkai_done = False
 
     async def drop_freemium_dokkai_task(self):
         topics = ["Japanese Culture", "A Sci-Fi Adventure", "A Slice of Life moment", "A Mystery", "Japanese Food", "Folklore", "School Life"]
@@ -809,7 +798,6 @@ class NihongoBot(commands.Bot):
                     embed = discord.Embed(title=f"🎁 Daily Free Reading: {title}", description=content, color=0x3498db)
                     embed.set_footer(text=f"Level: {lvl_name} | Topic: {topic}")
                     
-                    # 🟢 NEW: Use the Persistent View instead of temporary memory
                     view = PersistentFreemiumStoryView()
                     await channel.send(embed=embed, view=view)
                     
@@ -1062,11 +1050,11 @@ async def scenario(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to generate scenario: {e}", ephemeral=True)
 
-@bot.tree.command(name="resetkanji", description="[Admin] Reset Daily Kanji tracker.")
+@bot.tree.command(name="resetkanji", description="[Admin Only] Reset Daily Kanji tracker.")
 async def reset_kanji(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     if not any(r.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for r in interaction.user.roles): 
-        return await interaction.followup.send("❌ Denied.", ephemeral=True)
+        return await interaction.followup.send("❌ Access Denied.", ephemeral=True)
     kanji_db.delete_many({})
     await interaction.followup.send("✅ Kanji tracker reset to Day 1.", ephemeral=True)
 
