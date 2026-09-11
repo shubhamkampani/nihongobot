@@ -1209,7 +1209,7 @@ async def setup_tickets(interaction: discord.Interaction):
         description="Need help? Click a button below to open a ticket. Please choose correct option as needed.\n\n"
                     "🟦 **SUPPORT TICKET:** General help, bot issues, or server queries.\n"
                     "🟥 **REPORT AN INCIDENT:** Report rule-breaking or severe glitches (Learner Roles Only).\n"
-                    "💴 **GO PRO:** Enquire about or purchase the Pro Subscription and get access to exclusive features.", 
+                    "🟩 **GO PRO:** Enquire about or purchase the Pro Subscription and get access to exclusive features.", 
         color=0x2c3e50
     )
     
