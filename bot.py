@@ -57,39 +57,50 @@ def get_fallback_role(current_role_name):
         return ROLE_NAMES[0]
 
 def extract_json(raw_text):
-    """Ultimate JSON Extractor with AST fallback for AI hallucinations"""
     try:
         # 1. Clean markdown formatting
-        cleaned = re.sub(r'```(?:json|JSON)?\s*(.*?)\s*```', r'\1', raw_text, flags=re.DOTALL)
+        cleaned = re.sub(r'```(?:json|JSON)?\s*(.*?)\s*```', r'\1', raw_text, flags=re.DOTALL).strip()
         
-        # 2. Extract array bounds
-        start = cleaned.find('[')
-        end = cleaned.rfind(']')
+        # 2. Find potential bounds for both Array and Object
+        possible_jsons = []
         
-        if start != -1 and end != -1:
-            json_str = cleaned[start:end+1]
-        else:
-            start = cleaned.find('{')
-            end = cleaned.rfind('}')
-            if start != -1 and end != -1:
-                json_str = f"[{cleaned[start:end+1]}]"
-            else:
-                raise ValueError("No JSON bounds found in AI output.")
-
-        # 3. Fix trailing commas (common AI mistake)
-        json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+        start_a = cleaned.find('[')
+        end_a = cleaned.rfind(']')
+        if start_a != -1 and end_a != -1 and end_a > start_a:
+            possible_jsons.append(cleaned[start_a:end_a+1])
+            
+        start_d = cleaned.find('{')
+        end_d = cleaned.rfind('}')
+        if start_d != -1 and end_d != -1 and end_d > start_d:
+            possible_jsons.append(cleaned[start_d:end_d+1])
+            
+        if not possible_jsons:
+            raise ValueError("No JSON boundaries found.")
         
-        # 4. Attempt strict JSON parsing
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            # 5. AST Fallback: Parses Python-style dicts (handles single quotes perfectly)
-            safe_python_str = json_str.replace("null", "None").replace("true", "True").replace("false", "False")
-            return ast.literal_eval(safe_python_str)
-
+        # 3. Sort by length (descending) to ALWAYS try the outermost block first!
+        # This completely ignores stray brackets in conversational text.
+        possible_jsons.sort(key=len, reverse=True)
+        
+        for j_str in possible_jsons:
+            # Fix trailing commas (common AI mistake)
+            j_str_fixed = re.sub(r',\s*([\]}])', r'\1', j_str)
+            try:
+                # Try strict JSON parsing
+                return json.loads(j_str_fixed)
+            except json.JSONDecodeError:
+                try:
+                    # Fallback to Python AST eval if JSON formatting is slightly off
+                    safe_python_str = j_str_fixed.replace("null", "None").replace("true", "True").replace("false", "False")
+                    return ast.literal_eval(safe_python_str)
+                except (SyntaxError, ValueError):
+                    continue # Try the next boundary if this one completely fails
+                    
+        raise ValueError("All parsing attempts failed.")
+        
     except Exception as e:
-        print(f"⚠️ Ultimate JSON Parse Failed: {e}\n--- RAW AI OUTPUT ---\n{raw_text}\n---------------------")
-        return [{"question": "AI Formatting Error: Please try clicking again.", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
+        print(f"⚠️ JSON Parse Failed: {e}\nRaw AI Output:\n{raw_text}")
+        # Universal Fallback that protects both array-based (/quiz) and dict-based (/scenario) features from crashing the bot
+        return [{"question": "AI Formatting Error", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
 # --- 🧠 DIRECT GEMINI REST API (WITH EXPONENTIAL BACKOFF) ---
 async def generate_gemini_response(prompt):
