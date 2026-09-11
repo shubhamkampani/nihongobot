@@ -1138,13 +1138,14 @@ async def scenario(interaction: discord.Interaction):
     level_short = user_level_role.split(" ")[1] if user_level_role else "N3"
 
     prompt = f"""You are an expert Japanese linguist. The user is at the JLPT {level_short} level.
-    Create a highly engaging, realistic, and tense real-world situation in English. Examples of good themes: dealing with a strict police officer for a visa check, managing a dispute with a foreign Airbnb guest, an intense corporate IT rollout meeting, coordinating a tactical push in a multiplayer FPS game, or a technical debate about car maintenance. These are just examples of interesting scenarios, and scenarios should be of similar nature.
+    Create a highly engaging, realistic, and tense real-world situation in English. Examples of good themes: dealing with a strict police officer for a visa check, managing a dispute with a foreign Airbnb guest, an intense corporate IT rollout meeting, coordinating a tactical push in a multiplayer FPS game, or a technical debate about car maintenance.
     
     Provide exactly 4 Japanese responses the user could say. Only ONE is contextually and pragmatically appropriate for the formality and nuance of the situation. The other 3 should be grammatically similar but contextually wrong (rude, unnatural, or wrong nuance). 
-    
     CRITICAL RULES:
     1. Keep Japanese vocabulary strictly within {level_short} or below.
     2. If ANY Kanji is used in the options, you MUST provide its furigana in square brackets exactly after the Kanji (e.g., 毎日[まいにち]).
+    3. If SAME Kanji is repeated in another option, then just provide furigana only once in first option.
+    4. The EXAMPLES of interesting scenarios are just to provide context of how interesting and realistic the situations must be. Just take inspiration from examples and don't just repeat the scenarios or examples.
     
     Output ONLY valid JSON format exactly like this:
     {{
