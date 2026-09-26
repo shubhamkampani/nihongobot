@@ -220,13 +220,15 @@ async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit
 
 class QuizView(View):
     def __init__(self, user, questions, level, start_time):
-        super().__init__(timeout=60.0) # 1 Minute per question limit. Auto-resets on every button click.
+        # Overall view timeout is number of questions * 60 seconds
+        super().__init__(timeout=60.0 * len(questions)) 
         self.user = user
         self.questions = questions
         self.level = level
         self.current_idx = 0
         self.score = 0
         self.start_time = start_time
+        self.last_click = time.time() # 🟢 Tracker for 1 min per question rule
         self.total_q = len(questions)
         self.is_fallback = (self.total_q == 1 and "Formatting Error" in questions[0].get("question", ""))
         
@@ -238,6 +240,14 @@ class QuizView(View):
     async def button_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user.id: 
             return await interaction.response.send_message("❌ Not your quiz!", ephemeral=True)
+            
+        # 🟢 SMART 1 MINUTE IDLE CHECK
+        if time.time() - self.last_click > 60:
+            await interaction.response.edit_message(content="⏳ **Time's up! You took more than 1 minute on a single question.**\nQuiz ended. Your partial score was NOT saved.", embed=None, view=None)
+            self.stop()
+            return
+            
+        self.last_click = time.time() # Reset tracker for the next question
             
         if interaction.data['custom_id'] == self.questions[self.current_idx]['answer']: 
             self.score += 1
@@ -253,15 +263,14 @@ class QuizView(View):
             time_taken = round(time.time() - self.start_time)
             
             if self.is_fallback:
-                await interaction.response.edit_message(content="⚠️ An AI generation error occurred. Your score was not saved. Please try `/quiz` again.", embed=None, view=None)
-                return
+                return await interaction.response.edit_message(content="⚠️ An AI generation error occurred. Your score was not saved. Please try `/quiz` again.", embed=None, view=None)
                 
             quiz_db.update_one({"_id": self.user.id}, {"$set": {"level": self.level, "score": self.score, "time_taken": time_taken}}, upsert=True)
             
             embed = discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/{self.total_q}** in {time_taken}s.", color=discord.Color.green())
             await interaction.response.edit_message(embed=embed, view=None)
             
-            # Pro Promotion & Thank You Message
+            # Pro Promotion Message
             gopro_ch = discord.utils.get(interaction.guild.channels, name="💎・go-pro")
             ch_mention = gopro_ch.mention if gopro_ch else "#💎・go-pro"
             promo_msg = f"Thank you for completing the quiz, Result saved! 🎯\nKeep doing quizzes to top the leaderboard (results every Sunday).\n\nAlso visit {ch_mention} to unlock **Pro Mode** of the quiz and earn more points in one go! ✨"
@@ -269,8 +278,187 @@ class QuizView(View):
             except: pass
 
     async def on_timeout(self):
-        try: await self.message.edit(content="⏳ **Time's up! You took more than 1 minute to answer.**\nQuiz ended. Your partial score was NOT saved. Type `/quiz` to try again.", view=None, embed=None)
+        try: 
+            if hasattr(self, 'message') and self.message:
+                await self.message.edit(content="⏳ **Session Expired!** You took too long to complete the quiz.", view=None, embed=None)
         except: pass
+
+class GrammarWarningView(View):
+    def __init__(self, user, level_full, topic):
+        super().__init__(timeout=60)
+        self.user = user
+        self.level_full = level_full
+        self.topic = topic
+
+    @discord.ui.button(label="Yes, Continue (5 Qs)", style=discord.ButtonStyle.danger)
+    async def btn_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.edit_message(content=f"⏳ Generating 5 challenging questions for **{self.topic}**...", embed=None, view=None)
+        try:
+            q_data = await generate_quiz_data(self.level_full, is_grammar=True, topic=self.topic, force_limit=5)
+            q = q_data[0]
+            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            view = QuizView(self.user, q_data, self.level_full, time.time())
+            await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = await interaction.original_response()
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}", embed=None, view=None)
+
+    @discord.ui.button(label="No, Cancel", style=discord.ButtonStyle.secondary)
+    async def btn_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.edit_message(content="✅ Quiz cancelled.", embed=None, view=None)
+
+class GrammarTopicModal(discord.ui.Modal, title='Grammar Practice'):
+    topic_input = discord.ui.TextInput(
+        label='Enter Grammar Topic(s)',
+        style=discord.TextStyle.short,
+        placeholder='e.g., Te-form, Passive, Causative...',
+        max_length=100
+    )
+
+    def __init__(self, user, level_full):
+        super().__init__()
+        self.user = user
+        self.level_full = level_full
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        topic = self.topic_input.value
+        level_short = self.level_full.split(" ")[1]
+        
+        prompt = f"The user is currently studying for JLPT {level_short}. They want to practice the grammar concept(s): '{topic}'. Is this concept strictly within or below {level_short} syllabus? Reply ONLY with True or False."
+        try:
+            ai_verification = await generate_gemini_response(prompt)
+            is_valid = "true" in ai_verification.lower()
+            
+            if not is_valid:
+                role = discord.utils.get(interaction.guild.roles, name=self.level_full)
+                role_mention = role.mention if role else self.level_full
+                embed = discord.Embed(title="⚠️ Out of Syllabus Warning", description=f"This grammar concept **'{topic}'** doesn't feel relevant as per your current {role_mention} level.\n\nDo you still want to continue attempting this quiz? (You will only get 5 questions).", color=discord.Color.orange())
+                view = GrammarWarningView(self.user, self.level_full, topic)
+                msg = await interaction.edit_original_response(embed=embed, view=view)
+                view.message = msg
+                return
+            
+            has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+            q_count = 10 if has_pro else 5
+            
+            await interaction.edit_original_response(content=f"⏳ Generating {q_count} questions for **{topic}**...")
+            q_data = await generate_quiz_data(self.level_full, is_grammar=True, topic=topic, force_limit=q_count)
+            q = q_data[0]
+            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            view = QuizView(self.user, q_data, self.level_full, time.time())
+            await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = await interaction.original_response()
+            
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Verification/Fetch Error: {e}", embed=None, view=None)
+
+class QuizSelectionView(View):
+    def __init__(self, user, level_full):
+        super().__init__(timeout=120)
+        self.user = user
+        self.level_full = level_full
+
+    @discord.ui.button(label="General Quiz", style=discord.ButtonStyle.primary, emoji="📚")
+    async def btn_general(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+        q_count = 20 if has_pro else 10
+        
+        await interaction.response.edit_message(content=f"⏳ Generating {q_count} General {self.level_full} questions...", embed=None, view=None)
+        try:
+            q_data = await generate_quiz_data(self.level_full, is_grammar=False, force_limit=q_count)
+            q = q_data[0]
+            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            view = QuizView(self.user, q_data, self.level_full, time.time())
+            await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = await interaction.original_response()
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
+
+    @discord.ui.button(label="Grammar Quiz", style=discord.ButtonStyle.success, emoji="🧠")
+    async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.send_modal(GrammarTopicModal(self.user, self.level_full))
+        
+    @discord.ui.button(label="Listening Practice", style=discord.ButtonStyle.secondary, emoji="🎧")
+    async def btn_listening(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return await interaction.response.send_message("❌ **You need to join a Voice Channel first to start Listening Practice!**", ephemeral=True)
+            
+        vc = interaction.user.voice.channel
+        await interaction.response.edit_message(content=f"⏳ Joining **{vc.name}** and preparing your listening practice... Please wait.", embed=None, view=None)
+        
+        try:
+            # 1. Join Voice Channel
+            voice_client = discord.utils.get(interaction.client.voice_clients, guild=interaction.guild)
+            if voice_client and voice_client.is_connected():
+                await voice_client.move_to(vc)
+            else:
+                voice_client = await vc.connect()
+                
+            level_short = self.level_full.split(" ")[1]
+            has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+            q_count = 5 if has_pro else 3 # Limit listening questions slightly for speed
+            
+            # 2. Generate Audio Script & Questions from Gemini
+            prompt = f"""You are an expert JLPT Examiner. Generate a short Japanese listening script for JLPT {level_short} level.
+            Then generate {q_count} multiple-choice questions based ONLY on that script.
+            
+            CRITICAL RULES:
+            1. The script should be natural conversational Japanese (max 300 chars).
+            2. Use strictly double quotes (") for all keys.
+            3. Do not add trailing commas.
+            
+            Output ONLY a valid JSON object matching this exact structure:
+            {{
+                "script": "Japanese text here",
+                "questions": [
+                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A"}}
+                ]
+            }}"""
+            
+            raw_text = await generate_gemini_response(prompt)
+            data = extract_json(raw_text)
+            if isinstance(data, list): data = data[0]
+            
+            script = data.get("script", "")
+            questions_data = data.get("questions", [])
+            
+            if not script or not questions_data:
+                raise ValueError("AI failed to generate script or questions.")
+                
+            # 3. Text-to-Speech Generation
+            from gtts import gTTS
+            tts = gTTS(text=script, lang='ja')
+            tts.save("listening.mp3")
+            
+            await interaction.followup.send("🎧 **Playing audio in the Voice Channel... Listen carefully!**", ephemeral=True)
+            
+            # 4. Play Audio in VC
+            voice_client.play(discord.FFmpegPCMAudio("listening.mp3"))
+            
+            while voice_client.is_playing():
+                await asyncio.sleep(1)
+                
+            # 5. Leave VC and drop the Quiz!
+            await voice_client.disconnect()
+            
+            q = questions_data[0]
+            embed = discord.Embed(title=f"🎧 {self.level_full} Listening Quiz (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x9b59b6)
+            
+            view = QuizView(self.user, questions_data, self.level_full, time.time())
+            msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            view.message = msg
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Listening Error: {e}", ephemeral=True)
+            if 'voice_client' in locals() and voice_client.is_connected():
+                await voice_client.disconnect()
 
 class GrammarWarningView(View):
     def __init__(self, user, level_full, topic):
