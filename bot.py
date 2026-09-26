@@ -194,9 +194,33 @@ class PlacementQuizView(View):
         try: await self.message.edit(content="⏳ **Time's up!** Please select your role again to retry the test.", view=None, embed=None)
         except: pass
 
+async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit=10):
+    level_short = level_full.split(" ")[1] # Extracts "N5", "N4", etc.
+    prompt = f"You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice questions for JLPT {level_short}."
+    if is_grammar:
+        prompt += f"\nCRITICAL: These questions MUST strictly test the following grammar topic(s): {topic}. Do not ask general vocabulary questions."
+    else:
+        prompt += f"\nGenerate a mix of Grammar and Vocabulary questions."
+        
+    prompt += """
+    Strict Rules:
+    1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading.
+    2. NO VISUAL QUESTIONS.
+    3. Each question MUST have exactly one blank space represented by '___'.
+    4. Use Furigana in brackets after all Kanji in questions and options (e.g., 漢字【かんじ】).
+    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits. Shuffle the options.
+    6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
+    Output ONLY a valid JSON array of objects."""
+    
+    raw_text = await generate_gemini_response(prompt)
+    questions_data = extract_json(raw_text)
+    if not questions_data or len(questions_data) == 0:
+        raise ValueError("No questions generated.")
+    return questions_data
+
 class QuizView(View):
     def __init__(self, user, questions, level, start_time):
-        super().__init__(timeout=60) 
+        super().__init__(timeout=60.0) # 1 Minute per question limit. Auto-resets on every button click.
         self.user = user
         self.questions = questions
         self.level = level
@@ -233,11 +257,128 @@ class QuizView(View):
                 return
                 
             quiz_db.update_one({"_id": self.user.id}, {"$set": {"level": self.level, "score": self.score, "time_taken": time_taken}}, upsert=True)
-            await interaction.response.edit_message(embed=discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/{self.total_q}** in {time_taken}s.", color=discord.Color.green()), view=None)
+            
+            embed = discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/{self.total_q}** in {time_taken}s.", color=discord.Color.green())
+            await interaction.response.edit_message(embed=embed, view=None)
+            
+            # Pro Promotion & Thank You Message
+            gopro_ch = discord.utils.get(interaction.guild.channels, name="💎・go-pro")
+            ch_mention = gopro_ch.mention if gopro_ch else "#💎・go-pro"
+            promo_msg = f"Thank you for completing the quiz, Result saved! 🎯\nKeep doing quizzes to top the leaderboard (results every Sunday).\n\nAlso visit {ch_mention} to unlock **Pro Mode** of the quiz and earn more points in one go! ✨"
+            try: await interaction.followup.send(promo_msg, ephemeral=True)
+            except: pass
 
     async def on_timeout(self):
-        try: await self.message.edit(content="⏳ **Time's up!** Attempt cancelled to prevent spam.", view=None, embed=None)
+        try: await self.message.edit(content="⏳ **Time's up! You took more than 1 minute to answer.**\nQuiz ended. Your partial score was NOT saved. Type `/quiz` to try again.", view=None, embed=None)
         except: pass
+
+class GrammarWarningView(View):
+    def __init__(self, user, level_full, topic):
+        super().__init__(timeout=60)
+        self.user = user
+        self.level_full = level_full
+        self.topic = topic
+
+    @discord.ui.button(label="Yes, Continue (5 Qs)", style=discord.ButtonStyle.danger)
+    async def btn_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.edit_message(content=f"⏳ Generating 5 challenging questions for **{self.topic}**...", embed=None, view=None)
+        try:
+            q_data = await generate_quiz_data(self.level_full, is_grammar=True, topic=self.topic, force_limit=5)
+            q = q_data[0]
+            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            view = QuizView(self.user, q_data, self.level_full, time.time())
+            await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = interaction.message
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}", embed=None, view=None)
+
+    @discord.ui.button(label="No, Cancel", style=discord.ButtonStyle.secondary)
+    async def btn_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.edit_message(content="✅ Quiz cancelled.", embed=None, view=None)
+
+class GrammarTopicModal(discord.ui.Modal, title='Grammar Practice'):
+    topic_input = discord.ui.TextInput(
+        label='Enter Grammar Topic(s)',
+        style=discord.TextStyle.short,
+        placeholder='e.g., Te-form, Passive, Causative...',
+        max_length=100
+    )
+
+    def __init__(self, user, level_full):
+        super().__init__()
+        self.user = user
+        self.level_full = level_full
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        topic = self.topic_input.value
+        level_short = self.level_full.split(" ")[1]
+        
+        # SMART AI VERIFICATION
+        prompt = f"The user is currently studying for JLPT {level_short}. They want to practice the grammar concept(s): '{topic}'. Is this concept strictly within or below {level_short} syllabus? Reply ONLY with True or False."
+        
+        try:
+            ai_verification = await generate_gemini_response(prompt)
+            is_valid = "true" in ai_verification.lower()
+            
+            if not is_valid:
+                role = discord.utils.get(interaction.guild.roles, name=self.level_full)
+                role_mention = role.mention if role else self.level_full
+                embed = discord.Embed(title="⚠️ Out of Syllabus Warning", description=f"This grammar concept **'{topic}'** doesn't feel relevant as per your current {role_mention} level.\n\nDo you still want to continue attempting this quiz? (You will only get 5 questions).", color=discord.Color.orange())
+                view = GrammarWarningView(self.user, self.level_full, topic)
+                msg = await interaction.edit_original_response(embed=embed, view=view)
+                view.message = msg
+                return
+            
+            has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+            q_count = 10 if has_pro else 5
+            
+            await interaction.edit_original_response(content=f"⏳ Generating {q_count} questions for **{topic}**...")
+            q_data = await generate_quiz_data(self.level_full, is_grammar=True, topic=topic, force_limit=q_count)
+            q = q_data[0]
+            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            view = QuizView(self.user, q_data, self.level_full, time.time())
+            msg = await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = msg
+            
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Verification/Fetch Error: {e}", embed=None, view=None)
+
+class QuizSelectionView(View):
+    def __init__(self, user, level_full):
+        super().__init__(timeout=120)
+        self.user = user
+        self.level_full = level_full
+
+    @discord.ui.button(label="General Quiz", style=discord.ButtonStyle.primary, emoji="📚")
+    async def btn_general(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+        q_count = 20 if has_pro else 10
+        
+        await interaction.response.edit_message(content=f"⏳ Generating {q_count} General {self.level_full} questions...", embed=None, view=None)
+        
+        try:
+            q_data = await generate_quiz_data(self.level_full, is_grammar=False, force_limit=q_count)
+            q = q_data[0]
+            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
+            view = QuizView(self.user, q_data, self.level_full, time.time())
+            await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = interaction.message
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
+
+    @discord.ui.button(label="Grammar Quiz", style=discord.ButtonStyle.success, emoji="🧠")
+    async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.send_modal(GrammarTopicModal(self.user, self.level_full))
+        
+    @discord.ui.button(label="Listening Practice", style=discord.ButtonStyle.secondary, emoji="🎧")
+    async def btn_listening(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.send_message("🎧 **Listening Practice** is coming in the next major update! Stay tuned.", ephemeral=True)
 
 class StoryReaderView(View):
     def __init__(self, user, level, story_content):
@@ -1076,39 +1217,19 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
         view.message = msg 
     except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
-@bot.tree.command(name="quiz", description="Take a JLPT test.")
-@app_commands.choices(furigana=[
-    app_commands.Choice(name="Yes, include Furigana (Reading aids)", value="with_furigana"),
-    app_commands.Choice(name="No, just standard Kanji", value="without_furigana")
-])
-async def quiz(interaction: discord.Interaction, furigana: app_commands.Choice[str]):
-    await interaction.response.defer(ephemeral=True)
-    user_level = next((r.name.replace("📍 ", "").strip() for r in interaction.user.roles if r.name in ROLE_NAMES), None)
-    if not user_level: return await interaction.followup.send("❌ Get a N5-N1 role first.", ephemeral=True)
-    
-    furigana_rule = "Use Furigana in brackets after all Kanji in questions as well as options generated wherever required (e.g., 漢字【かんじ】)." if furigana.value == "with_furigana" else "DO NOT use Furigana/reading aids. Use standard Kanji."
-    await interaction.followup.send(f"⏳ Generating 20 {user_level} questions ({furigana.name})...", ephemeral=True)
-    
-    prompt = f"""You are an expert JLPT Examiner. Generate exactly 20 multiple-choice questions for JLPT {user_level} (10 Grammar, 10 Vocab).
-    Strict Rules:
-    1. CONTEXT-RICH TEXT ONLY: The sentence MUST provide enough logical context to be solved purely through reading.
-    2. NO VISUAL QUESTIONS: NEVER generate vague questions like "___は何ですか。" or "これは___です。"
-    3. Each question MUST have exactly one blank space represented by '___'.
-    4. {furigana_rule}
-    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits grammatically and semantically. Always shuffle the options.
-    6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
-    
-    Output ONLY a valid JSON array of 20 objects. DO NOT output any other text or markdown outside the JSON array."""
-    
-    try:
-        raw_text = await generate_gemini_response(prompt)
-        questions_data = extract_json(raw_text)
-        q = questions_data[0]
-        embed = discord.Embed(title=f"🎌 {user_level} Mock Test (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
-        view = QuizView(interaction.user, questions_data, user_level, time.time())
-        msg = await interaction.edit_original_response(content="", embed=embed, view=view)
-        view.message = msg 
-    except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
+@bot.tree.command(name="quiz", description="Start a customized Japanese Quiz (General, Grammar, or Listening).")
+async def quiz(interaction: discord.Interaction):
+    user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
+    if not user_level_role: 
+        return await interaction.response.send_message("❌ You need a JLPT Learner role (N5-N1) to start a quiz. Select your role in the welcome channel.", ephemeral=True)
+        
+    embed = discord.Embed(
+        title="🎯 Choose Your Quiz Mode", 
+        description=f"Your current level is **{user_level_role}**.\n\nSelect a practice mode below:", 
+        color=0x3498db
+    )
+    view = QuizSelectionView(interaction.user, user_level_role)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 @bot.tree.command(name="leaderboardannounce", description="[Admin Only] Check the Top 5 performing players for a specific level.")
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
