@@ -1,7 +1,6 @@
-discord.py
+discord.py[voice]
 Flask
 pymongo
 pytz
 aiohttp
 gTTS
-PyNaCl
