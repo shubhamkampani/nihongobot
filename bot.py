@@ -49,7 +49,6 @@ GREETINGS_LIST = [
 def has_main_role(member):
     return any(r.name in ROLE_NAMES or r.name in ["Visitor", "📍 Native Japanese"] for r in member.roles)
 
-
 def get_fallback_role(current_role_name):
     try:
         idx = ROLE_NAMES.index(current_role_name)
@@ -155,7 +154,7 @@ class PlacementQuizView(View):
         super().__init__(timeout=60)
         self.user, self.q, self.target_role = user, question_data, target_role_name
         self.is_changerole = is_changerole
-        self.is_native = is_native # 🟢 Tracks if it's a Native Test
+        self.is_native = is_native 
         
         for label in ["A", "B", "C", "D"]:
             btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
@@ -178,7 +177,6 @@ class PlacementQuizView(View):
             if self.is_changerole:
                 await interaction.response.edit_message(content=f"❌ **Incorrect!** The correct answer was {self.q['answer']}. Your role has not been changed.", embed=None, view=None)
             elif self.is_native:
-                # 🟢 NATIVE FAILED LOGIC: Shows the Welcome Menu Again!
                 embed = discord.Embed(title="⚠️ Native Placement Test Failed", description=f"The correct answer was **{self.q['answer']}**.\n\nYou did not pass the Native Japanese test. Please choose your path again below to retry or select a different option.", color=discord.Color.red())
                 await interaction.response.edit_message(content="", embed=embed, view=WelcomeView())
             else:
@@ -195,7 +193,7 @@ class PlacementQuizView(View):
         except: pass
 
 async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit=10):
-    level_short = level_full.split(" ")[1] # Extracts "N5", "N4", etc.
+    level_short = level_full.split(" ")[1] 
     prompt = f"You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice questions for JLPT {level_short}."
     if is_grammar:
         prompt += f"\nCRITICAL: These questions MUST strictly test the following grammar topic(s): {topic}. Do not ask general vocabulary questions."
@@ -220,7 +218,6 @@ async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit
 
 class QuizView(View):
     def __init__(self, user, questions, level, start_time):
-        # Overall view timeout is number of questions * 60 seconds
         super().__init__(timeout=60.0 * len(questions)) 
         self.user = user
         self.questions = questions
@@ -228,7 +225,7 @@ class QuizView(View):
         self.current_idx = 0
         self.score = 0
         self.start_time = start_time
-        self.last_click = time.time() # 🟢 Tracker for 1 min per question rule
+        self.last_click = time.time() 
         self.total_q = len(questions)
         self.is_fallback = (self.total_q == 1 and "Formatting Error" in questions[0].get("question", ""))
         
@@ -241,13 +238,12 @@ class QuizView(View):
         if interaction.user.id != self.user.id: 
             return await interaction.response.send_message("❌ Not your quiz!", ephemeral=True)
             
-        # 🟢 SMART 1 MINUTE IDLE CHECK
         if time.time() - self.last_click > 60:
             await interaction.response.edit_message(content="⏳ **Time's up! You took more than 1 minute on a single question.**\nQuiz ended. Your partial score was NOT saved.", embed=None, view=None)
             self.stop()
             return
             
-        self.last_click = time.time() # Reset tracker for the next question
+        self.last_click = time.time() 
             
         if interaction.data['custom_id'] == self.questions[self.current_idx]['answer']: 
             self.score += 1
@@ -270,7 +266,6 @@ class QuizView(View):
             embed = discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/{self.total_q}** in {time_taken}s.", color=discord.Color.green())
             await interaction.response.edit_message(embed=embed, view=None)
             
-            # Pro Promotion Message
             gopro_ch = discord.utils.get(interaction.guild.channels, name="💎・go-pro")
             ch_mention = gopro_ch.mention if gopro_ch else "#💎・go-pro"
             promo_msg = f"Thank you for completing the quiz, Result saved! 🎯\nKeep doing quizzes to top the leaderboard (results every Sunday).\n\nAlso visit {ch_mention} to unlock **Pro Mode** of the quiz and earn more points in one go! ✨"
@@ -300,7 +295,7 @@ class GrammarWarningView(View):
             embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
             view = QuizView(self.user, q_data, self.level_full, time.time())
             await interaction.edit_original_response(content="", embed=embed, view=view)
-            view.message = await interaction.original_response()
+            view.message = interaction.message
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}", embed=None, view=None)
 
@@ -459,114 +454,6 @@ class QuizSelectionView(View):
             await interaction.followup.send(f"❌ Listening Error: {e}", ephemeral=True)
             if 'voice_client' in locals() and voice_client.is_connected():
                 await voice_client.disconnect()
-
-class GrammarWarningView(View):
-    def __init__(self, user, level_full, topic):
-        super().__init__(timeout=60)
-        self.user = user
-        self.level_full = level_full
-        self.topic = topic
-
-    @discord.ui.button(label="Yes, Continue (5 Qs)", style=discord.ButtonStyle.danger)
-    async def btn_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user.id: return
-        await interaction.response.edit_message(content=f"⏳ Generating 5 challenging questions for **{self.topic}**...", embed=None, view=None)
-        try:
-            q_data = await generate_quiz_data(self.level_full, is_grammar=True, topic=self.topic, force_limit=5)
-            q = q_data[0]
-            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
-            view = QuizView(self.user, q_data, self.level_full, time.time())
-            await interaction.edit_original_response(content="", embed=embed, view=view)
-            view.message = interaction.message
-        except Exception as e:
-            await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}", embed=None, view=None)
-
-    @discord.ui.button(label="No, Cancel", style=discord.ButtonStyle.secondary)
-    async def btn_no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user.id: return
-        await interaction.response.edit_message(content="✅ Quiz cancelled.", embed=None, view=None)
-
-class GrammarTopicModal(discord.ui.Modal, title='Grammar Practice'):
-    topic_input = discord.ui.TextInput(
-        label='Enter Grammar Topic(s)',
-        style=discord.TextStyle.short,
-        placeholder='e.g., Te-form, Passive, Causative...',
-        max_length=100
-    )
-
-    def __init__(self, user, level_full):
-        super().__init__()
-        self.user = user
-        self.level_full = level_full
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        topic = self.topic_input.value
-        level_short = self.level_full.split(" ")[1]
-        
-        # SMART AI VERIFICATION
-        prompt = f"The user is currently studying for JLPT {level_short}. They want to practice the grammar concept(s): '{topic}'. Is this concept strictly within or below {level_short} syllabus? Reply ONLY with True or False."
-        
-        try:
-            ai_verification = await generate_gemini_response(prompt)
-            is_valid = "true" in ai_verification.lower()
-            
-            if not is_valid:
-                role = discord.utils.get(interaction.guild.roles, name=self.level_full)
-                role_mention = role.mention if role else self.level_full
-                embed = discord.Embed(title="⚠️ Out of Syllabus Warning", description=f"This grammar concept **'{topic}'** doesn't feel relevant as per your current {role_mention} level.\n\nDo you still want to continue attempting this quiz? (You will only get 5 questions).", color=discord.Color.orange())
-                view = GrammarWarningView(self.user, self.level_full, topic)
-                msg = await interaction.edit_original_response(embed=embed, view=view)
-                view.message = msg
-                return
-            
-            has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
-            q_count = 10 if has_pro else 5
-            
-            await interaction.edit_original_response(content=f"⏳ Generating {q_count} questions for **{topic}**...")
-            q_data = await generate_quiz_data(self.level_full, is_grammar=True, topic=topic, force_limit=q_count)
-            q = q_data[0]
-            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
-            view = QuizView(self.user, q_data, self.level_full, time.time())
-            msg = await interaction.edit_original_response(content="", embed=embed, view=view)
-            view.message = msg
-            
-        except Exception as e:
-            await interaction.edit_original_response(content=f"❌ Verification/Fetch Error: {e}", embed=None, view=None)
-
-class QuizSelectionView(View):
-    def __init__(self, user, level_full):
-        super().__init__(timeout=120)
-        self.user = user
-        self.level_full = level_full
-
-    @discord.ui.button(label="General Quiz", style=discord.ButtonStyle.primary, emoji="📚")
-    async def btn_general(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user.id: return
-        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
-        q_count = 20 if has_pro else 10
-        
-        await interaction.response.edit_message(content=f"⏳ Generating {q_count} General {self.level_full} questions...", embed=None, view=None)
-        
-        try:
-            q_data = await generate_quiz_data(self.level_full, is_grammar=False, force_limit=q_count)
-            q = q_data[0]
-            embed = discord.Embed(title=f"🎌 {self.level_full} Mock Test (1/{len(q_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x3498db)
-            view = QuizView(self.user, q_data, self.level_full, time.time())
-            await interaction.edit_original_response(content="", embed=embed, view=view)
-            view.message = interaction.message
-        except Exception as e:
-            await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
-
-    @discord.ui.button(label="Grammar Quiz", style=discord.ButtonStyle.success, emoji="🧠")
-    async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user.id: return
-        await interaction.response.send_modal(GrammarTopicModal(self.user, self.level_full))
-        
-    @discord.ui.button(label="Listening Practice", style=discord.ButtonStyle.secondary, emoji="🎧")
-    async def btn_listening(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user.id: return
-        await interaction.response.send_message("🎧 **Listening Practice** is coming in the next major update! Stay tuned.", ephemeral=True)
 
 class StoryReaderView(View):
     def __init__(self, user, level, story_content):
@@ -1756,5 +1643,4 @@ async def manage_vc(interaction: discord.Interaction, action: app_commands.Choic
         await interaction.channel.send(notif_msg, delete_after=28800)
         await interaction.followup.send("✅ Members revoked and disconnected successfully.", ephemeral=True)
     
-
 bot.run(os.environ.get("BOT_TOKEN"))
