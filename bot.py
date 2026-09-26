@@ -440,7 +440,7 @@ class QuizSelectionView(View):
             await interaction.followup.send("🎧 **Playing audio in the Voice Channel... Listen carefully!**", ephemeral=True)
             
             # 4. Play Audio in VC
-            voice_client.play(discord.FFmpegPCMAudio("listening.mp3"))
+            voice_client.play(discord.FFmpegPCMAudio("listening.mp3", executable="./ffmpeg"))
             
             while voice_client.is_playing():
                 await asyncio.sleep(1)
