@@ -3,3 +3,4 @@ Flask
 pymongo
 pytz
 aiohttp
+pip install gTTS PyNaCl
