@@ -350,6 +350,92 @@ class GrammarTopicModal(discord.ui.Modal, title='Grammar Practice'):
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ Verification/Fetch Error: {e}", embed=None, view=None)
 
+# --- 🎧 GLOBAL QUEUE FOR LISTENING ---
+listening_queues = {} 
+queue_processing = {} 
+
+async def process_listening_queue(guild, client):
+    queue_processing[guild.id] = True
+    while listening_queues.get(guild.id, []):
+        task = listening_queues[guild.id][0] 
+        user = task["user"]
+        vc = task["vc"]
+        level_full = task["level"]
+        channel = task["channel"]
+        
+        try:
+            await channel.send(f"🎧 {user.mention}, it's your turn! Joining **{vc.name}** now...", delete_after=15)
+            
+            voice_client = discord.utils.get(client.voice_clients, guild=guild)
+            if voice_client and voice_client.is_connected():
+                await voice_client.move_to(vc)
+            else:
+                voice_client = await vc.connect()
+                
+            level_short = level_full.split(" ")[1]
+            has_pro = any(r.name == "金 Pro Learners 金" for r in user.roles)
+            q_count = 5 if has_pro else 3 
+            
+            prompt = f"""You are an expert JLPT Examiner. Generate a short Japanese listening script for JLPT {level_short} level.
+            Then generate {q_count} multiple-choice questions based ONLY on that script.
+            
+            CRITICAL RULES:
+            1. NARRATOR INTRO: The script MUST start with a narrator providing context (e.g., "男の人と女の人が話しています。" or "田中さんと佐藤さんが話しています。").
+            2. CLEAR ROLES: Use clear names or roles in the script and the questions so the listener knows exactly who is speaking.
+            3. NATURAL: The script should be natural conversational Japanese (max 300 chars).
+            4. FURIGANA MANDATORY: In ALL multiple-choice questions and options, you MUST provide furigana in square brackets exactly after EVERY Kanji used (e.g., 毎日[まいにち]).
+            5. JSON FORMAT: Use strictly double quotes (") for all keys. Do not add trailing commas.
+            
+            Output ONLY a valid JSON object matching this exact structure:
+            {{
+                "script": "Narrator intro... followed by dialogue...",
+                "questions": [
+                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A"}}
+                ]
+            }}"""
+            
+            raw_text = await generate_gemini_response(prompt)
+            data = extract_json(raw_text)
+            if isinstance(data, list): data = data[0]
+            
+            script = data.get("script", "")
+            questions_data = data.get("questions", [])
+            
+            if not script or not questions_data:
+                raise ValueError("AI failed to generate script or questions.")
+                
+            # Speed Control Logic (Slow for N5/N4)
+            is_slow = True if level_short in ["N5", "N4"] else False
+            
+            from gtts import gTTS
+            tts = gTTS(text=script, lang='ja', slow=is_slow)
+            tts.save(f"listening_{guild.id}.mp3")
+            
+            voice_client.play(discord.FFmpegPCMAudio(f"listening_{guild.id}.mp3", executable="./ffmpeg"))
+            
+            while voice_client.is_playing():
+                await asyncio.sleep(1)
+                
+            await voice_client.disconnect()
+            
+            q = questions_data[0]
+            embed = discord.Embed(title=f"🎧 {level_full} Listening Quiz (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x9b59b6)
+            
+            view = QuizView(user, questions_data, level_full, time.time())
+            msg = await channel.send(content=f"{user.mention}, here is your listening quiz!", embed=embed, view=view)
+            view.message = msg
+            
+        except Exception as e:
+            await channel.send(f"❌ Listening Error for {user.mention}: {e}")
+            if 'voice_client' in locals() and voice_client and voice_client.is_connected():
+                await voice_client.disconnect()
+                
+        # Remove completed task from queue
+        if listening_queues.get(guild.id):
+            listening_queues[guild.id].pop(0)
+            
+    queue_processing[guild.id] = False
+
 class QuizSelectionView(View):
     def __init__(self, user, level_full):
         super().__init__(timeout=120)
@@ -386,74 +472,43 @@ class QuizSelectionView(View):
             return await interaction.response.send_message("❌ **You need to join a Voice Channel first to start Listening Practice!**", ephemeral=True)
             
         vc = interaction.user.voice.channel
-        await interaction.response.edit_message(content=f"⏳ Joining **{vc.name}** and preparing your listening practice... Please wait.", embed=None, view=None)
+        guild_id = interaction.guild.id
         
-        try:
-            # 1. Join Voice Channel
-            voice_client = discord.utils.get(interaction.client.voice_clients, guild=interaction.guild)
-            if voice_client and voice_client.is_connected():
-                await voice_client.move_to(vc)
-            else:
-                voice_client = await vc.connect()
+        if guild_id not in listening_queues:
+            listening_queues[guild_id] = []
+            
+        # Prevent same user from spamming queue
+        for task in listening_queues[guild_id]:
+            if task["user"].id == interaction.user.id:
+                return await interaction.response.send_message("⚠️ You are already in the listening queue! Please wait for your turn.", ephemeral=True)
                 
-            level_short = self.level_full.split(" ")[1]
-            has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
-            q_count = 5 if has_pro else 3 # Limit listening questions slightly for speed
-            
-            # 2. Generate Audio Script & Questions from Gemini
-            prompt = f"""You are an expert JLPT Examiner. Generate a short Japanese listening script for JLPT {level_short} level.
-            Then generate {q_count} multiple-choice questions based ONLY on that script.
-            
-            CRITICAL RULES:
-            1. The script should be natural conversational Japanese (max 300 chars).
-            2. Use strictly double quotes (") for all keys.
-            3. Do not add trailing commas.
-            
-            Output ONLY a valid JSON object matching this exact structure:
-            {{
-                "script": "Japanese text here",
-                "questions": [
-                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A"}}
-                ]
-            }}"""
-            
-            raw_text = await generate_gemini_response(prompt)
-            data = extract_json(raw_text)
-            if isinstance(data, list): data = data[0]
-            
-            script = data.get("script", "")
-            questions_data = data.get("questions", [])
-            
-            if not script or not questions_data:
-                raise ValueError("AI failed to generate script or questions.")
+        # Add to the global queue
+        listening_queues[guild_id].append({
+            "user": interaction.user,
+            "vc": vc,
+            "level": self.level_full,
+            "channel": interaction.channel
+        })
+        
+        queue_position = len(listening_queues[guild_id])
+        
+        if queue_position == 1 and not queue_processing.get(guild_id, False):
+            # Immediate start
+            await interaction.response.edit_message(content=f"⏳ Joining **{vc.name}** and preparing your listening practice... Please wait.", embed=None, view=None)
+            asyncio.create_task(process_listening_queue(interaction.guild, interaction.client))
+        else:
+            # Show queue embed if someone else is already listening
+            queue_text = f"⏳ **Listening Queue for {interaction.guild.name}:**\n"
+            for idx, task in enumerate(listening_queues[guild_id]):
+                queue_text += f"{idx + 1}. {task['user'].mention} in queue\n"
                 
-            # 3. Text-to-Speech Generation
-            from gtts import gTTS
-            tts = gTTS(text=script, lang='ja')
-            tts.save("listening.mp3")
+            queue_text += f"\n{interaction.user.mention}, let me concentrate on the current users. I'll come to you when it's your turn!"
             
-            await interaction.followup.send("🎧 **Playing audio in the Voice Channel... Listen carefully!**", ephemeral=True)
+            embed = discord.Embed(title="🎧 Listening Queue", description=queue_text, color=0x3498db)
+            await interaction.response.edit_message(content="", embed=embed, view=None)
             
-            # 4. Play Audio in VC
-            voice_client.play(discord.FFmpegPCMAudio("listening.mp3", executable="./ffmpeg"))
-            
-            while voice_client.is_playing():
-                await asyncio.sleep(1)
-                
-            # 5. Leave VC and drop the Quiz!
-            await voice_client.disconnect()
-            
-            q = questions_data[0]
-            embed = discord.Embed(title=f"🎧 {self.level_full} Listening Quiz (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x9b59b6)
-            
-            view = QuizView(self.user, questions_data, self.level_full, time.time())
-            msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-            view.message = msg
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Listening Error: {e}", ephemeral=True)
-            if 'voice_client' in locals() and voice_client.is_connected():
-                await voice_client.disconnect()
+            if not queue_processing.get(guild_id, False):
+                asyncio.create_task(process_listening_queue(interaction.guild, interaction.client))
 
 class StoryReaderView(View):
     def __init__(self, user, level, story_content):
@@ -1642,5 +1697,6 @@ async def manage_vc(interaction: discord.Interaction, action: app_commands.Choic
         
         await interaction.channel.send(notif_msg, delete_after=28800)
         await interaction.followup.send("✅ Members revoked and disconnected successfully.", ephemeral=True)
-    
+
+
 bot.run(os.environ.get("BOT_TOKEN"))
