@@ -818,6 +818,16 @@ class NihongoBot(commands.Bot):
                                     )
                                 try: await channel.send(content=f"🎉 **THE RESULTS ARE IN!** {role.mention}", embed=embed)
                                 except Exception: pass
+                            else:
+                                # 🟢 NEW LOGIC: Empty Leaderboard Announcement
+                                empty_embed = discord.Embed(
+                                    title="😔 No Champions This Week", 
+                                    description="There are no Weekly Champions for this week.\n\nWant to become one? Type `/quiz` and start now to claim the #1 spot! Winners get exclusive role.", 
+                                    color=0x95a5a6
+                                )
+                                empty_embed.set_footer(text=f"Level: {role_name}")
+                                try: await channel.send(content=role.mention, embed=empty_embed)
+                                except Exception: pass
                                 
         elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 1:
             self.night_announce_done = False
