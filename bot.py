@@ -444,7 +444,7 @@ async def process_listening_queue(guild, client):
             tts = gTTS(text=script, lang='ja', slow=is_slow)
             tts.save(f"listening_{guild.id}.mp3")
             
-            voice_client.play(discord.FFmpegPCMAudio(f"listening_{guild.id}.mp3", executable="./ffmpeg"))
+            voice_client.play(discord.FFmpegPCMAudio(f"listening_{guild.id}.mp3", executable="ffmpeg"))
             
             while voice_client.is_playing():
                 await asyncio.sleep(1)
