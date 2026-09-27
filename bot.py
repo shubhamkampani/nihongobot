@@ -261,7 +261,11 @@ class QuizView(View):
             if self.is_fallback:
                 return await interaction.response.edit_message(content="⚠️ An AI generation error occurred. Your score was not saved. Please try `/quiz` again.", embed=None, view=None)
                 
-            quiz_db.update_one({"_id": self.user.id}, {"$set": {"level": self.level, "score": self.score, "time_taken": time_taken}}, upsert=True)
+            quiz_db.update_one(
+                {"_id": self.user.id, "level": self.level}, 
+                {"$inc": {"score": self.score, "time_taken": time_taken}}, 
+                upsert=True
+            )
             
             embed = discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/{self.total_q}** in {time_taken}s.", color=discord.Color.green())
             await interaction.response.edit_message(embed=embed, view=None)
@@ -1069,6 +1073,14 @@ class NihongoBot(commands.Bot):
                 self.night_announce_done = True
                 
                 for guild in self.guilds:
+                    # 1. Purane sabhi champions se role wapas lena
+                    champion_role = discord.utils.get(guild.roles, name="Weekly Champion")
+                    if champion_role:
+                        for member in champion_role.members:
+                            try: await member.remove_roles(champion_role)
+                            except: pass
+                    
+                    # 2. Naye winners announce karna aur role dena
                     for role_name in ROLE_NAMES:
                         level_short = role_name.split(" ")[1].lower()
                         channel = discord.utils.find(lambda c: f"{level_short}-leaderboard" in c.name.lower(), guild.channels)
@@ -1084,13 +1096,20 @@ class NihongoBot(commands.Bot):
                                 for idx, user_data in enumerate(scorers_list):
                                     embed.add_field(
                                         name=f"{medals[idx]} Rank #{idx + 1}", 
-                                        value=f"<@{user_data['_id']}> - **Score: {user_data['score']}/20** (Time: {user_data.get('time_taken', 'N/A')}s)", 
+                                        value=f"<@{user_data['_id']}> - **Total Score: {user_data['score']}** (Total Time: {user_data.get('time_taken', 0)}s)", 
                                         inline=False
                                     )
-                                try: await channel.send(content=f"🎉 **THE RESULTS ARE IN!** {role.mention}", embed=embed)
+                                
+                                # Assign role to Rank #1
+                                winner_id = scorers_list[0]['_id']
+                                winner = guild.get_member(winner_id)
+                                if winner and champion_role:
+                                    try: await winner.add_roles(champion_role)
+                                    except: pass
+                                    
+                                try: await channel.send(content=f"🎉 **THE RESULTS ARE IN!** {role.mention}\nCongratulations to <@{winner_id}> for becoming the {level_short.upper()} Weekly Champion! 👑", embed=embed)
                                 except Exception: pass
                             else:
-                                # 🟢 NEW LOGIC: Empty Leaderboard Announcement
                                 empty_embed = discord.Embed(
                                     title="😔 No Champions This Week", 
                                     description="There are no Weekly Champions for this week.\n\nWant to become one? Type `/quiz` and start now to claim the #1 spot! Winners get exclusive role.", 
@@ -1361,31 +1380,58 @@ async def quiz(interaction: discord.Interaction):
     view = QuizSelectionView(interaction.user, user_level_role)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-@bot.tree.command(name="leaderboardannounce", description="[Admin Only] Check the Top 5 performing players for a specific level.")
-@app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
-async def leaderboard_announce(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
+@bot.tree.command(name="leaderboardannounce", description="[Admin] Manually trigger Weekly Announcement for ALL levels & wipe DB.")
+async def leaderboard_announce(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
     if not has_permission:
-        return await interaction.followup.send("❌ Access Denied: You need `セィニア・アデュミン` or `ファウンダ` role to use this.", ephemeral=True)
-    
-    level_full_name = target_level.value
-    top_scorers = quiz_db.find({"level": level_full_name}).sort([("score", -1), ("time_taken", 1)]).limit(5)
-    scorers_list = list(top_scorers)
-    
-    if not scorers_list:
-        return await interaction.followup.send(f"⚠️ No data found for {level_full_name} this week.", ephemeral=True)
+        return await interaction.followup.send("❌ Access Denied: You need Senior Admin or Founder role.", ephemeral=True)
         
-    embed = discord.Embed(title=f"🏆 Top 5 Leaderboard: {level_full_name}", color=0xf1c40f)
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-    for idx, user_data in enumerate(scorers_list):
-        embed.add_field(
-            name=f"{medals[idx]} Rank #{idx + 1}", 
-            value=f"<@{user_data['_id']}> - **Score: {user_data['score']}/20** (Time: {user_data.get('time_taken', 'N/A')}s)", 
-            inline=False
-        )
+    guild = interaction.guild
     
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    # 1. Remove Champion role from previous winners
+    champion_role = discord.utils.get(guild.roles, name="Weekly Champion")
+    if champion_role:
+        for member in champion_role.members:
+            try: await member.remove_roles(champion_role)
+            except: pass
+            
+    # 2. Announce all levels and assign new roles
+    for role_name in ROLE_NAMES:
+        level_short = role_name.split(" ")[1].lower()
+        channel = discord.utils.find(lambda c: f"{level_short}-leaderboard" in c.name.lower(), guild.channels)
+        role = discord.utils.get(guild.roles, name=role_name)
+        
+        if channel and role:
+            top_scorers = quiz_db.find({"level": role_name}).sort([("score", -1), ("time_taken", 1)]).limit(3)
+            scorers_list = list(top_scorers)
+            
+            if scorers_list:
+                embed = discord.Embed(title=f"🏆 Weekly Leaderboard: {role_name}", color=0xf1c40f)
+                medals = ["🥇", "🥈", "🥉"]
+                for idx, user_data in enumerate(scorers_list):
+                    embed.add_field(
+                        name=f"{medals[idx]} Rank #{idx + 1}", 
+                        value=f"<@{user_data['_id']}> - **Total Score: {user_data['score']}** (Total Time: {user_data.get('time_taken', 0)}s)", 
+                        inline=False
+                    )
+                
+                winner_id = scorers_list[0]['_id']
+                winner = guild.get_member(winner_id)
+                if winner and champion_role:
+                    try: await winner.add_roles(champion_role)
+                    except: pass
+                    
+                try: await channel.send(content=f"🎉 **THE RESULTS ARE IN!** {role.mention}\nCongratulations to <@{winner_id}> for becoming the {level_short.upper()} Weekly Champion! 👑", embed=embed)
+                except Exception: pass
+            else:
+                empty_embed = discord.Embed(title="😔 No Champions This Week", description="No one played this week. Type `/quiz` to claim #1!", color=0x95a5a6)
+                try: await channel.send(content=role.mention, embed=empty_embed)
+                except: pass
+                
+    # 3. Wipe Database completely to reset scores
+    quiz_db.delete_many({})
+    await interaction.followup.send("✅ Manual Leaderboard Announcement complete! Roles updated and Database wiped.", ephemeral=True)
 
 @bot.tree.command(name="read", description="[Premium] Generate a personalized Japanese short story based on your JLPT level.")
 @app_commands.describe(topic="What should the story be about? (e.g., Cyberpunk, Romance, Tokyo Trip)")
@@ -1591,7 +1637,7 @@ async def manage_vc(interaction: discord.Interaction, action: app_commands.Choic
     # 2. Level Validation Setup
     valid_roles = ROLE_NAMES + ["📍 Native Japanese"]
     user_levels = [r.name for r in interaction.user.roles if r.name in valid_roles]
-    has_champion = any(r.name == "Special Weekly Champion" for r in interaction.user.roles)
+    has_champion = any(r.name == "Weekly Champion" for r in interaction.user.roles)
 
     if not user_levels:
         return await interaction.followup.send("❌ You must have a JLPT (N5-N1) or Native Japanese role to use this feature.", ephemeral=True)
