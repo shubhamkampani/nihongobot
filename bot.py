@@ -230,6 +230,7 @@ class QuizView(View):
         self.last_click = time.time() 
         self.total_q = len(questions)
         self.is_fallback = (self.total_q == 1 and "Formatting Error" in questions[0].get("question", ""))
+        self.user_choices = [] # 🟢 NAYA TRACKER: User ke answers track karne ke liye
         
         for label in ["A", "B", "C", "D"]:
             btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
@@ -246,6 +247,9 @@ class QuizView(View):
             return
             
         self.last_click = time.time() 
+        
+        # 🟢 Record the user's choice
+        self.user_choices.append(interaction.data['custom_id'])
             
         if interaction.data['custom_id'] == self.questions[self.current_idx]['answer']: 
             self.score += 1
@@ -272,11 +276,34 @@ class QuizView(View):
             embed = discord.Embed(title="🏁 Quiz Completed!", description=f"Score: **{self.score}/{self.total_q}** in {time_taken}s.", color=discord.Color.green())
             await interaction.response.edit_message(embed=embed, view=None)
             
+            # 🟢 NAYA LOGIC: Detailed Ephemeral Explanation
+            has_explanations = any("explanation" in q for q in self.questions)
+            if has_explanations:
+                exp_embed = discord.Embed(title="📖 Listening Review & Explanations", color=0x3498db)
+                for i, q in enumerate(self.questions):
+                    user_ans = self.user_choices[i]
+                    correct_ans = q['answer']
+                    mark = "✅ Correct" if user_ans == correct_ans else f"❌ Incorrect (Answer was {correct_ans})"
+                    
+                    exp_embed.add_field(
+                        name=f"Q{i+1}: You chose {user_ans} | {mark}", 
+                        value=f"*{q.get('explanation', 'No explanation provided.')}*", 
+                        inline=False
+                    )
+                try: await interaction.followup.send(embed=exp_embed, ephemeral=True)
+                except: pass
+            
             gopro_ch = discord.utils.get(interaction.guild.channels, name="💎・go-pro")
             ch_mention = gopro_ch.mention if gopro_ch else "#💎・go-pro"
             promo_msg = f"Thank you for completing the quiz, Result saved! 🎯\nKeep doing quizzes to top the leaderboard (results every Sunday).\n\nAlso visit {ch_mention} to unlock **Pro Mode** of the quiz and earn more points in one go! ✨"
             try: await interaction.followup.send(promo_msg, ephemeral=True)
             except: pass
+
+    async def on_timeout(self):
+        try: 
+            if hasattr(self, 'message') and self.message:
+                await self.message.edit(content="⏳ **Session Expired!** You took too long to complete the quiz.", view=None, embed=None)
+        except: pass
 
     async def on_timeout(self):
         try: 
@@ -386,9 +413,9 @@ async def process_listening_queue(guild, client):
             Then generate {q_count} multiple-choice questions based ONLY on that script.
             
             CRITICAL RULES:
-            1. NARRATOR INTRO: The script MUST start with a narrator providing context (e.g., "男の人と女の人が話しています。" or "田中さんと佐藤さんが話しています。").
-            2. CLEAR ROLES: Use clear names or roles in the script and the questions so the listener knows exactly who is speaking.
-            3. NATURAL: The script should be natural conversational Japanese (max 300 chars).
+            1. NARRATOR INTRO: The script MUST start with a narrator providing context (e.g., "男の人と女の人が話しています。" or "田中さんと佐藤さんが話しています。"). This context will help understand the listener that converstaion is between which 2 people. 
+            2. CLEAR ROLES: Use clear names or roles in the script and the questions so the listener knows exactly who is speaking. Also use the similar names or roles given throughout conversation, just before narrator's respective dialouge.
+            3. NATURAL: The script should be natural conversational Japanese (max 350 chars). As the script will be used for practising for JLPT listening exam so it should be relevant for {level_short} level and the story/script should be randomized always meaning no same script should be repeated more than once.
             4. FURIGANA MANDATORY: In ALL multiple-choice questions and options, you MUST provide furigana in square brackets exactly after EVERY Kanji used (e.g., 毎日[まいにち]).
             5. JSON FORMAT: Use strictly double quotes (") for all keys. Do not add trailing commas.
             
@@ -396,7 +423,7 @@ async def process_listening_queue(guild, client):
             {{
                 "script": "Narrator intro... followed by dialogue...",
                 "questions": [
-                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A"}}
+                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A", "explanation": "Brief English explanation of why this answer is correct and others are wrong based on the story."}}
                 ]
             }}"""
             
