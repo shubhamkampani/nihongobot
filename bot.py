@@ -197,8 +197,16 @@ class PlacementQuizView(View):
 async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit=10):
     level_short = level_full.split(" ")[1] 
     prompt = f"You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice questions for JLPT {level_short}."
+    
     if is_grammar:
-        prompt += f"\nCRITICAL: These questions MUST strictly test the following grammar topic(s): {topic}. Do not ask general vocabulary questions."
+        prompt += f"""
+    CRITICAL GRAMMAR TASK: You are testing the user purely on this specific grammar topic(s): '{topic}'.
+    ANTI-EXPLOIT RULES FOR OPTIONS:
+    1. THE CONTEXTUAL TRAP: The user must NOT be able to guess the correct answer just by looking for the requested topic. They MUST read the sentence context to solve it.
+    2. SMART DISTRACTORS: The 3 incorrect options (A, B, C, D) MUST be either:
+       - The EXACT same root word but with different, confusing conjugations (e.g., if testing Passive, the options must be Passive, Causative, Causative-Passive, and Active forms of the same verb).
+       - Similar or commonly confused JLPT {level_short} grammar structures that look grammatically plausible but completely fail logically in the given sentence.
+    3. Make it challenging. The difference between the right and wrong answers should rely strictly on reading comprehension and nuanced grammar rules."""
     else:
         prompt += f"\nGenerate a mix of Grammar and Vocabulary questions."
         
