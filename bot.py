@@ -1387,14 +1387,14 @@ async def leaderboard(interaction: discord.Interaction, target_level: app_comman
 @bot.tree.command(name="translate", description="Translate any text (Any Language ↔ Japanese).")
 async def translate_slash(interaction: discord.Interaction, text: str):
     # 🟢 NEW: Role Restriction Check
-    allowed_roles = ["Weekly Champion", "📍 Native Japanese"]
+    allowed_roles = ["Weekly Champion"]
     if not any(r.name in allowed_roles for r in interaction.user.roles):
-        return await interaction.response.send_message("❌ Only available to use by `Native Japanese` or `Weekly Champion`, become one by topping your `Weekly Leaderboard`. Use `/quiz` now.", ephemeral=True)
+        return await interaction.response.send_message("❌ Can only be used by `Weekly Champion`, become one by topping your `Weekly Leaderboard`. Use `/quiz` now.", ephemeral=True)
         
     await interaction.response.defer()
     
     # 🟢 ULTRA-OPTIMIZED PROMPT
-    prompt = f'Translate "{text}" to Japanese (if EN/HI) or English (if JP). For JP text, use Kanji【kana】 format. Return ONLY valid JSON: {{"t": "translation", "r": "romaji"}}'
+    prompt = f'Translate "{text}" to Polite Native Japanese (written in language other than JP). For JP output text, use Kanji【kana】 format. Return ONLY valid JSON: {{"t": "translation", "r": "romaji"}}'
     
     try:
         raw_text = await generate_gemini_response(prompt)
@@ -1405,7 +1405,7 @@ async def translate_slash(interaction: discord.Interaction, text: str):
             
         # 🟢 AESTHETIC EMBED DESIGN
         embed = discord.Embed(color=0x1abc9c)
-        embed.set_author(name="🌐 Nihongo Translator", icon_url=bot.user.display_avatar.url if bot.user.display_avatar else None)
+        embed.set_author(name="🌐 日本語 Translator", icon_url=bot.user.display_avatar.url if bot.user.display_avatar else None)
         
         # Original text with a quote block for elegance
         embed.add_field(name="📝 Original Text", value=f"> {text}", inline=False)
@@ -1417,7 +1417,7 @@ async def translate_slash(interaction: discord.Interaction, text: str):
         if data.get("r"):
             embed.add_field(name="🗣️ Romaji Reading", value=f"*{data.get('r')}*", inline=False)
             
-        embed.set_footer(text="Powered by AI Sensei")
+        embed.set_footer(text="Powered by 司会者 - AI SENSEI")
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
@@ -1429,6 +1429,11 @@ async def translate_slash(interaction: discord.Interaction, text: str):
 # ---------------------------------------------------------
 @bot.tree.context_menu(name="Translate to EN/JP")
 async def translate_context_menu(interaction: discord.Interaction, message: discord.Message):
+    # 🟢 NEW: Role Restriction Check
+    allowed_roles = ["Weekly Champion", "📍 Native Japanese"]
+    if not any(r.name in allowed_roles for r in interaction.user.roles):
+        return await interaction.response.send_message("❌ Only available to use by `Native Japanese` or `Weekly Champion`, become one by topping your `Weekly Leaderboard`. Use `/quiz` now.", ephemeral=True)
+
     # Check agar message khali hai (jaise sirf image ya sticker)
     if not message.content:
         return await interaction.response.send_message("❌ There is no text in this message to translate.", ephemeral=True)
