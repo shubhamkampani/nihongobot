@@ -1387,6 +1387,80 @@ async def leaderboard(interaction: discord.Interaction, target_level: app_comman
     embed.set_footer(text="Results reset every Sunday at 10:01 PM JST")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
+# ---------------------------------------------------------
+# 1. THE SLASH COMMAND (For manual typing)
+# ---------------------------------------------------------
+@bot.tree.command(name="translate", description="Translate any text (English/Hindi ↔ Japanese).")
+async def translate_slash(interaction: discord.Interaction, text: str):
+    await interaction.response.defer()
+    
+    # 🟢 ULTRA-OPTIMIZED PROMPT
+    prompt = f'Translate "{text}" to Japanese (if EN/HI) or English (if JP). For JP text, use Kanji【kana】 format. Return ONLY valid JSON: {{"t": "translation", "r": "romaji"}}'
+    
+    try:
+        raw_text = await generate_gemini_response(prompt)
+        data = extract_json(raw_text)
+        
+        if isinstance(data, list):
+            data = data[0]
+            
+        embed = discord.Embed(color=0x1abc9c)
+        embed.set_author(name="🌐 Nihongo Translator")
+        
+        embed.add_field(name="Original", value=f"*{text}*", inline=False)
+        embed.add_field(name="Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
+        
+        if data.get("r"):
+            embed.add_field(name="Romaji", value=data.get("r"), inline=False)
+            
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        print(f"Translation Error (Slash): {e}")
+        await interaction.followup.send("❌ Error translating text. Please try again.", ephemeral=True)
+
+# ---------------------------------------------------------
+# 2. THE "APPS" CONTEXT MENU COMMAND (Right-Click / Long Press)
+# ---------------------------------------------------------
+@bot.tree.context_menu(name="Translate to EN/JP")
+async def translate_context_menu(interaction: discord.Interaction, message: discord.Message):
+    # Check agar message khali hai (jaise sirf image ya sticker)
+    if not message.content:
+        return await interaction.response.send_message("❌ There is no text in this message to translate.", ephemeral=True)
+        
+    await interaction.response.defer()
+    
+    # Text agar bohot lamba hai toh thoda limit kar dete hain token bachane ke liye (optional)
+    text_to_translate = message.content[:1000] 
+    
+    # 🟢 EXACT SAME OPTIMIZED PROMPT
+    prompt = f'Translate "{text_to_translate}" to Japanese (if EN/HI) or English (if JP). For JP text, use Kanji【kana】 format. Return ONLY valid JSON: {{"t": "translation", "r": "romaji"}}'
+    
+    try:
+        raw_text = await generate_gemini_response(prompt)
+        data = extract_json(raw_text)
+        
+        if isinstance(data, list):
+            data = data[0]
+            
+        embed = discord.Embed(color=0x3498db)
+        # Kisne likha tha aur kisne translate kiya
+        embed.set_author(name=f"Translated from {message.author.display_name}'s message", icon_url=message.author.display_avatar.url if message.author.display_avatar else None)
+        
+        embed.add_field(name="Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
+        
+        if data.get("r"):
+            embed.add_field(name="Romaji", value=data.get("r"), inline=False)
+            
+        # Message ka link bhi daal dete hain taaki user original message par jump kar sake
+        embed.description = f"[Jump to original message]({message.jump_url})"
+            
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        print(f"Translation Error (Context Menu): {e}")
+        await interaction.followup.send("❌ Error translating the message. Please try again.", ephemeral=True)
+
 @bot.tree.command(name="changerole", description="Upgrade your JLPT level.")
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
 async def changerole(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
@@ -1793,81 +1867,6 @@ async def manage_vc(interaction: discord.Interaction, action: app_commands.Choic
         
         await interaction.channel.send(notif_msg, delete_after=28800)
         await interaction.followup.send("✅ Members revoked and disconnected successfully.", ephemeral=True)
-
-# ---------------------------------------------------------
-# 1. THE SLASH COMMAND (For manual typing)
-# ---------------------------------------------------------
-@bot.tree.command(name="translate", description="Translate any text (English/Hindi ↔ Japanese).")
-async def translate_slash(interaction: discord.Interaction, text: str):
-    await interaction.response.defer()
-    
-    # 🟢 ULTRA-OPTIMIZED PROMPT
-    prompt = f'Translate "{text}" to Japanese (if EN/HI) or English (if JP). For JP text, use Kanji【kana】 format. Return ONLY valid JSON: {{"t": "translation", "r": "romaji"}}'
-    
-    try:
-        raw_text = await generate_gemini_response(prompt)
-        data = extract_json(raw_text)
-        
-        if isinstance(data, list):
-            data = data[0]
-            
-        embed = discord.Embed(color=0x1abc9c)
-        embed.set_author(name="🌐 Nihongo Translator")
-        
-        embed.add_field(name="Original", value=f"*{text}*", inline=False)
-        embed.add_field(name="Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
-        
-        if data.get("r"):
-            embed.add_field(name="Romaji", value=data.get("r"), inline=False)
-            
-        await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        print(f"Translation Error (Slash): {e}")
-        await interaction.followup.send("❌ Error translating text. Please try again.", ephemeral=True)
-
-
-# ---------------------------------------------------------
-# 2. THE "APPS" CONTEXT MENU COMMAND (Right-Click / Long Press)
-# ---------------------------------------------------------
-@bot.tree.context_menu(name="Translate to EN/JP")
-async def translate_context_menu(interaction: discord.Interaction, message: discord.Message):
-    # Check agar message khali hai (jaise sirf image ya sticker)
-    if not message.content:
-        return await interaction.response.send_message("❌ There is no text in this message to translate.", ephemeral=True)
-        
-    await interaction.response.defer()
-    
-    # Text agar bohot lamba hai toh thoda limit kar dete hain token bachane ke liye (optional)
-    text_to_translate = message.content[:1000] 
-    
-    # 🟢 EXACT SAME OPTIMIZED PROMPT
-    prompt = f'Translate "{text_to_translate}" to Japanese (if EN/HI) or English (if JP). For JP text, use Kanji【kana】 format. Return ONLY valid JSON: {{"t": "translation", "r": "romaji"}}'
-    
-    try:
-        raw_text = await generate_gemini_response(prompt)
-        data = extract_json(raw_text)
-        
-        if isinstance(data, list):
-            data = data[0]
-            
-        embed = discord.Embed(color=0x3498db)
-        # Kisne likha tha aur kisne translate kiya
-        embed.set_author(name=f"Translated from {message.author.display_name}'s message", icon_url=message.author.display_avatar.url if message.author.display_avatar else None)
-        
-        embed.add_field(name="Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
-        
-        if data.get("r"):
-            embed.add_field(name="Romaji", value=data.get("r"), inline=False)
-            
-        # Message ka link bhi daal dete hain taaki user original message par jump kar sake
-        embed.description = f"[Jump to original message]({message.jump_url})"
-            
-        await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        print(f"Translation Error (Context Menu): {e}")
-        await interaction.followup.send("❌ Error translating the message. Please try again.", ephemeral=True)
 
 
 bot.run(os.environ.get("BOT_TOKEN"))
