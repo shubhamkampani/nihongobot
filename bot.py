@@ -1254,7 +1254,7 @@ class NihongoBot(commands.Bot):
             self.daily_dokkai_done = False
 
     async def drop_freemium_dokkai_task(self):
-        topics = ["Japanese Culture", "A Sci-Fi Adventure", "A Slice of Life moment", "A Mystery", "Japanese Food", "Folklore", "School Life"]
+        topics = ["Japanese Culture", "A Sci-Fi Adventure", "Daily Mysteries & Unspoken Rules", "A Slice of Life moment", "A Mystery", "Folklore", "School Life", "Japanese Food & Café Culture", "Modern Habits & Tech"]
         topic = random.choice(topics)
         
         level_configs = [
@@ -1271,11 +1271,19 @@ class NihongoBot(commands.Bot):
                 if not channel:
                     continue
                     
+                # 🟢 NAYA LOGIC: Check if level needs Romaji (Only N5 & N4)
+                needs_romaji = lvl_name in ["N5", "N4"]
+                
                 prompt = f"""You are an expert Japanese linguist and JLPT examiner.
                 Task: Generate a short narrative (max 300 Japanese characters) about '{topic}'.
                 Constraint 1: Strictly use ONLY vocabulary and grammar points from JLPT levels N5 up to {lvl_name}.
-                Constraint 2: Do not use complex Kanji outside of the specified JLPT level unless furigana is provided in parenthesis.
-                Output Format: Return ONLY valid JSON with exactly two keys: "title" and "story_content". Do not add trailing commas."""
+                Constraint 2: Do not use complex Kanji outside of the specified JLPT level unless furigana is provided in parenthesis."""
+                
+                # 🟢 PROMPT CONDITION: Romaji sirf tab maangega jab level N5/N4 ho
+                if needs_romaji:
+                    prompt += """\nOutput Format: Return ONLY valid JSON with exactly three keys: "title", "story_content", and "romaji" (the exact romaji pronunciation of the story text). Do not add trailing commas."""
+                else:
+                    prompt += """\nOutput Format: Return ONLY valid JSON with exactly two keys: "title" and "story_content". Do not add trailing commas."""
                 
                 try:
                     raw_text = await generate_gemini_response(prompt)
@@ -1286,6 +1294,11 @@ class NihongoBot(commands.Bot):
 
                     title = story_data.get("title", f"{lvl_name} Daily Reading")
                     content = story_data.get("story_content", "Could not generate story.")
+                    romaji = story_data.get("romaji", "")
+
+                    # 🟢 APPEND ROMAJI SPOILER: Story ke theek niche tumhare format mein
+                    if needs_romaji and romaji:
+                        content += f"\n\n**Romaji translation (click to reveal):**\n||{romaji}||"
 
                     embed = discord.Embed(title=f"🎁 Daily Free Reading: {title}", description=content, color=0x3498db)
                     embed.set_footer(text=f"Level: {lvl_name} | Topic: {topic}")
