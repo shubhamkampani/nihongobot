@@ -1390,7 +1390,7 @@ async def leaderboard(interaction: discord.Interaction, target_level: app_comman
 # ---------------------------------------------------------
 # 1. THE SLASH COMMAND (For manual typing)
 # ---------------------------------------------------------
-@bot.tree.command(name="translate", description="Translate any text (English/Hindi ↔ Japanese).")
+@bot.tree.command(name="translate", description="Translate any text (Any Language ↔ Japanese).")
 async def translate_slash(interaction: discord.Interaction, text: str):
     await interaction.response.defer()
     
@@ -1404,20 +1404,22 @@ async def translate_slash(interaction: discord.Interaction, text: str):
         if isinstance(data, list):
             data = data[0]
             
+        # 🟢 AESTHETIC EMBED DESIGN
         embed = discord.Embed(color=0x1abc9c)
-        embed.set_author(name="🌐 Nihongo Translator")
+        embed.set_author(name="🌐 Nihongo Translator", icon_url=bot.user.display_avatar.url if bot.user.display_avatar else None)
         
-        embed.add_field(name="Original", value=f"*{text}*", inline=False)
-        embed.add_field(name="Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
+        # Original text with a quote block for elegance
+        embed.add_field(name="📝 Original Text", value=f"> {text}", inline=False)
         
+        # Translation with bold and clear spacing
+        embed.add_field(name="🎌 Japanese Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
+        
+        # Romaji only if it exists, styled as a subtle sub-text
         if data.get("r"):
-            embed.add_field(name="Romaji", value=data.get("r"), inline=False)
+            embed.add_field(name="🗣️ Romaji Reading", value=f"*{data.get('r')}*", inline=False)
             
+        embed.set_footer(text="Powered by AI Sensei")
         await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        print(f"Translation Error (Slash): {e}")
-        await interaction.followup.send("❌ Error translating text. Please try again.", ephemeral=True)
 
 # ---------------------------------------------------------
 # 2. THE "APPS" CONTEXT MENU COMMAND (Right-Click / Long Press)
@@ -1443,23 +1445,26 @@ async def translate_context_menu(interaction: discord.Interaction, message: disc
         if isinstance(data, list):
             data = data[0]
             
+        # 🟢 AESTHETIC EMBED DESIGN
         embed = discord.Embed(color=0x3498db)
-        # Kisne likha tha aur kisne translate kiya
-        embed.set_author(name=f"Translated from {message.author.display_name}'s message", icon_url=message.author.display_avatar.url if message.author.display_avatar else None)
         
-        embed.add_field(name="Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
+        # Show who requested the translation and whose message it was
+        embed.set_author(name=f"Translated for {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
         
+        # The actual translated text, prominent and bold
+        embed.add_field(name="🎌 Translation", value=f"**{data.get('t', 'Error fetching translation.')}**", inline=False)
+        
+        # Romaji in italics for subtle styling
         if data.get("r"):
-            embed.add_field(name="Romaji", value=data.get("r"), inline=False)
+            embed.add_field(name="🗣️ Romaji Reading", value=f"*{data.get('r')}*", inline=False)
             
-        # Message ka link bhi daal dete hain taaki user original message par jump kar sake
-        embed.description = f"[Jump to original message]({message.jump_url})"
+        # Add a beautiful jump link format at the bottom
+        embed.add_field(name="🔗 Original Message", value=f"[Click here to jump to {message.author.display_name}'s message]({message.jump_url})", inline=False)
+        
+        # Footer to show it's a context action
+        embed.set_footer(text="Context Menu Translation")
             
         await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        print(f"Translation Error (Context Menu): {e}")
-        await interaction.followup.send("❌ Error translating the message. Please try again.", ephemeral=True)
 
 @bot.tree.command(name="changerole", description="Upgrade your JLPT level.")
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
