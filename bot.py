@@ -1386,6 +1386,11 @@ async def leaderboard(interaction: discord.Interaction, target_level: app_comman
 # ---------------------------------------------------------
 @bot.tree.command(name="translate", description="Translate any text (Any Language ↔ Japanese).")
 async def translate_slash(interaction: discord.Interaction, text: str):
+    # 🟢 NEW: Role Restriction Check
+    allowed_roles = ["Weekly Champion", "📍 Native Japanese"]
+    if not any(r.name in allowed_roles for r in interaction.user.roles):
+        return await interaction.response.send_message("❌ Only available to use by `Native Japanese` or `Weekly Champion`, become one by topping your `Weekly Leaderboard`. Use `/quiz` now.", ephemeral=True)
+        
     await interaction.response.defer()
     
     # 🟢 ULTRA-OPTIMIZED PROMPT
