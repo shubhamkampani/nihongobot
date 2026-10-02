@@ -1627,7 +1627,7 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
         view.message = msg 
     except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
-@bot.tree.command(name="quiz", description="Start a customized Japanese (General, Grammar, Listening or Kanji Reading) Quiz. Press ENTER or SEND to start.")
+@bot.tree.command(name="quiz", description="Start a customized Japanese (General, Grammar, Listening or Kanji Reading) Quiz. Send to START")
 async def quiz(interaction: discord.Interaction):
     user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
     if not user_level_role: 
