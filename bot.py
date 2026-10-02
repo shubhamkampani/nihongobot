@@ -194,6 +194,42 @@ class PlacementQuizView(View):
         try: await self.message.edit(content="⏳ **Time's up!** Please select your role again to retry the test.", view=None, embed=None)
         except: pass
 
+async def generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, force_limit=10):
+    half_limit = force_limit // 2
+    
+    # 50% current level kanji, 50% lower levels (agar lower level exist karti hai)
+    if kanjis_lower:
+        selected_kanjis = random.sample(kanjis_current, min(half_limit, len(kanjis_current)))
+        selected_kanjis += random.sample(kanjis_lower, min(force_limit - len(selected_kanjis), len(kanjis_lower)))
+    else:
+        # N5 walo ke liye sirf unka level hi aayega
+        selected_kanjis = random.sample(kanjis_current, min(force_limit, len(kanjis_current)))
+        
+    random.shuffle(selected_kanjis)
+    kanji_str = ", ".join(selected_kanjis)
+
+    prompt = f"""You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice Kanji Reading questions for JLPT {level_short}.
+    CRITICAL RULES:
+    1. You MUST use ONLY words formed from these specific Kanjis: {kanji_str}.
+    2. The 'question' MUST be visually large using markdown. Format it exactly like this: "What is the correct reading for this word?\\n# **[Insert Kanji Word Here]**". Do not add any furigana in the question.
+    3. The 4 options (A, B, C, D) MUST be strictly in 100% Hiragana. Do not use Romaji or English.
+    4. Provide a very brief English 'explanation' of the meaning of the Kanji word.
+    5. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Output ONLY a valid JSON array of objects.
+
+    Output format:
+    [{{
+        "question": "What is the correct reading for this word?\\n# **毎日**",
+        "options": {{"A": "まいにち", "B": "まいんち", "C": "まにち", "D": "まんち"}},
+        "answer": "A",
+        "explanation": "毎日 (まいにち) means 'every day'."
+    }}]"""
+    
+    raw_text = await generate_gemini_response(prompt)
+    questions_data = extract_json(raw_text)
+    if not questions_data or len(questions_data) == 0:
+        raise ValueError("No Kanji questions generated.")
+    return questions_data
+
 async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit=10):
     level_short = level_full.split(" ")[1] 
     prompt = f"You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice questions for JLPT {level_short}."
@@ -227,8 +263,8 @@ async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit
     return questions_data
 
 class QuizView(View):
-    def __init__(self, user, questions, level, start_time):
-        super().__init__(timeout=60.0 * len(questions)) 
+    def __init__(self, user, questions, level, start_time, time_limit_per_q=60):
+        super().__init__(timeout=time_limit_per_q * len(questions)) 
         self.user = user
         self.questions = questions
         self.level = level
@@ -237,8 +273,9 @@ class QuizView(View):
         self.start_time = start_time
         self.last_click = time.time() 
         self.total_q = len(questions)
+        self.time_limit_per_q = time_limit_per_q # 🟢 Naya dynamic timer
         self.is_fallback = (self.total_q == 1 and "Formatting Error" in questions[0].get("question", ""))
-        self.user_choices = [] # 🟢 NAYA TRACKER: User ke answers track karne ke liye
+        self.user_choices = [] 
         
         for label in ["A", "B", "C", "D"]:
             btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
@@ -249,8 +286,9 @@ class QuizView(View):
         if interaction.user.id != self.user.id: 
             return await interaction.response.send_message("❌ Not your quiz!", ephemeral=True)
             
-        if time.time() - self.last_click > 60:
-            await interaction.response.edit_message(content="⏳ **Time's up! You took more than 1 minute on a single question.**\nQuiz ended. Your partial score was NOT saved.", embed=None, view=None)
+        # 🟢 Naya Anti-Cheat Strict Timer Check
+        if time.time() - self.last_click > self.time_limit_per_q:
+            await interaction.response.edit_message(content="⏳ **Time's up! quiz ended, please retry as partial score doesn't gets saved.**", embed=None, view=None)
             self.stop()
             return
             
@@ -498,7 +536,7 @@ class QuizSelectionView(View):
     async def btn_grammar(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user.id: return
         await interaction.response.send_modal(GrammarTopicModal(self.user, self.level_full))
-        
+
     @discord.ui.button(label="Listening Practice", style=discord.ButtonStyle.secondary, emoji="🎧")
     async def btn_listening(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user.id: return
@@ -544,6 +582,54 @@ class QuizSelectionView(View):
             
             if not queue_processing.get(guild_id, False):
                 asyncio.create_task(process_listening_queue(interaction.guild, interaction.client))
+
+    @discord.ui.button(label="Kanji Reading Quiz", style=discord.ButtonStyle.danger, emoji="🈴")
+    async def btn_kanji(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+        q_count = 20 if has_pro else 10
+        level_short = self.level_full.split(" ")[1]
+        
+        # 🟢 Timer and Syllabus Setup Based on Level
+        kanjis_current = []
+        kanjis_lower = []
+        time_limit = 60
+        
+        if level_short == "N5":
+            kanjis_current = N5_KANJI
+            time_limit = 30
+        elif level_short == "N4":
+            kanjis_current = N4_KANJI
+            kanjis_lower = N5_KANJI
+            time_limit = 30
+        elif level_short == "N3":
+            kanjis_current = N3_KANJI
+            kanjis_lower = N5_KANJI + N4_KANJI
+            time_limit = 20
+        elif level_short == "N2":
+            kanjis_current = N2_KANJI
+            kanjis_lower = N5_KANJI + N4_KANJI + N3_KANJI
+            time_limit = 10
+        elif level_short == "N1":
+            kanjis_current = N1_KANJI
+            kanjis_lower = N5_KANJI + N4_KANJI + N3_KANJI + N2_KANJI
+            time_limit = 10
+
+        warning_msg = f"⏳ **Anti-Cheat Active:** You will have strictly **{time_limit} seconds** per question to answer.\nGenerating {q_count} Kanji questions (50% from {level_short}, 50% from lower levels)..."
+        await interaction.response.edit_message(content=warning_msg, embed=None, view=None)
+        
+        try:
+            q_data = await generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, force_limit=q_count)
+            q = q_data[0]
+            embed = discord.Embed(title=f"🎌 {self.level_full} Kanji Mock Test (1/{len(q_data)})", description=f"{q['question']}\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0xe74c3c)
+            # Pass the strict time limit to the view
+            view = QuizView(self.user, q_data, self.level_full, time.time(), time_limit_per_q=time_limit)
+            await interaction.edit_original_response(content="", embed=embed, view=view)
+            view.message = await interaction.original_response()
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
+        
+
 
 class StoryReaderView(View):
     def __init__(self, user, level, story_content):
