@@ -313,12 +313,6 @@ class QuizView(View):
                 await self.message.edit(content="⏳ **Session Expired!** You took too long to complete the quiz.", view=None, embed=None)
         except: pass
 
-    async def on_timeout(self):
-        try: 
-            if hasattr(self, 'message') and self.message:
-                await self.message.edit(content="⏳ **Session Expired!** You took too long to complete the quiz.", view=None, embed=None)
-        except: pass
-
 class GrammarWarningView(View):
     def __init__(self, user, level_full, topic):
         super().__init__(timeout=60)
@@ -1420,6 +1414,10 @@ async def translate_slash(interaction: discord.Interaction, text: str):
             
         embed.set_footer(text="Powered by AI Sensei")
         await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        print(f"Translation Error (Slash): {e}")
+        await interaction.followup.send("❌ Error translating text. Please try again.", ephemeral=True)
 
 # ---------------------------------------------------------
 # 2. THE "APPS" CONTEXT MENU COMMAND (Right-Click / Long Press)
@@ -1465,6 +1463,10 @@ async def translate_context_menu(interaction: discord.Interaction, message: disc
         embed.set_footer(text="Context Menu Translation")
             
         await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        print(f"Translation Error (Context Menu): {e}")
+        await interaction.followup.send("❌ Error translating the message. Please try again.", ephemeral=True)
 
 @bot.tree.command(name="changerole", description="Upgrade your JLPT level.")
 @app_commands.choices(target_level=[app_commands.Choice(name=r.split(" ", 1)[1], value=r) for r in ROLE_NAMES])
