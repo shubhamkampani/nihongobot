@@ -228,6 +228,23 @@ async def generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, fo
     questions_data = extract_json(raw_text)
     if not questions_data or len(questions_data) == 0:
         raise ValueError("No Kanji questions generated.")
+        
+    # 🟢 STRICT PYTHON SHUFFLING LOGIC (Breaks the Option 'A' always correct Pattern)
+    for q in questions_data:
+        try:
+            correct_val = q['options'][q['answer']]
+            vals = list(q['options'].values())
+            random.shuffle(vals)
+            labels = ["A", "B", "C", "D"]
+            new_options = {}
+            for idx, val in enumerate(vals):
+                new_options[labels[idx]] = val
+                if val == correct_val:
+                    q['answer'] = labels[idx]
+            q['options'] = new_options
+        except KeyError:
+            continue
+            
     return questions_data
 
 async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit=10):
@@ -252,7 +269,7 @@ async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit
     2. NO VISUAL QUESTIONS.
     3. Each question MUST have exactly one blank space represented by '___'.
     4. Use Furigana in brackets after all Kanji in questions and options (e.g., 漢字【かんじ】).
-    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits. Shuffle the options.
+    5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits.
     6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
     Output ONLY a valid JSON array of objects."""
     
@@ -260,6 +277,23 @@ async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit
     questions_data = extract_json(raw_text)
     if not questions_data or len(questions_data) == 0:
         raise ValueError("No questions generated.")
+        
+    # 🟢 STRICT PYTHON SHUFFLING LOGIC (Breaks the Option 'A' Pattern)
+    for q in questions_data:
+        try:
+            correct_val = q['options'][q['answer']]
+            vals = list(q['options'].values())
+            random.shuffle(vals)
+            labels = ["A", "B", "C", "D"]
+            new_options = {}
+            for idx, val in enumerate(vals):
+                new_options[labels[idx]] = val
+                if val == correct_val:
+                    q['answer'] = labels[idx]
+            q['options'] = new_options
+        except KeyError:
+            continue
+            
     return questions_data
 
 class QuizView(View):
@@ -1593,7 +1627,7 @@ async def changerole(interaction: discord.Interaction, target_level: app_command
         view.message = msg 
     except Exception as e: await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
-@bot.tree.command(name="quiz", description="Start a customized Japanese Quiz (General, Grammar, or Listening).")
+@bot.tree.command(name="quiz", description="Start a customized Japanese (General, Grammar, Listening or Kanji Reading) Quiz. Press ENTER or SEND to start.")
 async def quiz(interaction: discord.Interaction):
     user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
     if not user_level_role: 
