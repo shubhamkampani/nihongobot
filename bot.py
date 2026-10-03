@@ -1566,6 +1566,22 @@ class NihongoBot(commands.Bot):
         except Exception as e:
             print(f"Tracker Drop Error: {e}")
 
+    # 🟢 VC Cleanup Loop
+    @tasks.loop(minutes=10)
+    async def vc_cleanup_loop(self):
+        for guild in self.guilds:
+            category = discord.utils.get(guild.categories, name="📣 ボイソ・チャト")
+            if not category:
+                continue
+                
+            for vc in category.voice_channels:
+                # Bot check karega ki VC ko bane hue 8 ghante (8 hours) ho gaye hain ya nahi
+                if discord.utils.utcnow() - vc.created_at > timedelta(hours=8):
+                    try:
+                        await vc.delete(reason="8 hour auto-delete limit reached.")
+                    except Exception as e:
+                        print(f"Failed to delete VC: {e}")
+
 bot = NihongoBot()
 
 # --- ⌨️ COMMANDS ---
