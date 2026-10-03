@@ -20,6 +20,7 @@ import ast
 import asyncio
 from kanjis import N5_KANJI, N4_KANJI, N3_KANJI, N2_KANJI, N1_KANJI
 from discord.ext import voice_recv
+from gtts import gTTS
 import speech_recognition as sr
 from difflib import SequenceMatcher
 
