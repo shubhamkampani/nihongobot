@@ -2139,7 +2139,7 @@ async def manage_vc(interaction: discord.Interaction, action: app_commands.Choic
         await interaction.followup.send("✅ Members revoked and disconnected successfully.", ephemeral=True)
 
 # ==========================================
-# 🎙️ SHADOW SPEAKING (OPTION B + UI PANEL)
+# 🎙️ SHADOW SPEAKING (OPTION B + UI PANEL + REPEAT PRIORITY)
 # ==========================================
 shadow_queues = {}
 shadow_processing = {}
@@ -2158,12 +2158,12 @@ async def process_shadow_queue(guild, client):
         vc_channel = task["vc"]
         topic = task["topic"]
         level_short = task["level_short"]
-        saved_data = task.get("saved_data") # 🟢 REPEAT KE LIYE CACHED DATA
+        saved_data = task.get("saved_data") 
         channel = interaction.channel
         
         try:
             if not saved_data:
-                # 1. Fetch AI Data (NEW: 2-3 Lines + Level Specific Grammar)
+                # 1. Fetch AI Data (Level Specific Grammar & 2-3 Lines)
                 await channel.send(f"⏳ **{user.mention}, your Shadow Speaking session is starting in {vc_channel.name}!** Generating {level_short} script...", delete_after=10)
                 
                 prompt = f"""You are a Japanese Sensei. 
@@ -2180,7 +2180,6 @@ async def process_shadow_queue(guild, client):
                 data = extract_json(raw_text)
                 if isinstance(data, list): data = data[0]
             else:
-                # 🟢 Agar user ne repeat manga tha, toh purana data use karo bina API cost ke
                 data = saved_data
                 
             ai_sentence = data.get("sentence", "")
@@ -2204,7 +2203,7 @@ async def process_shadow_queue(guild, client):
                 
             await voice_client.disconnect()
             
-            # 4. Wait logic with PRIORITY REPEAT EVENT
+            # 4. Wait logic with PRIORITY REPEAT
             repeat_event = asyncio.Event()
 
             class TurnView(View):
@@ -2212,45 +2211,41 @@ async def process_shadow_queue(guild, client):
                     super().__init__(timeout=120.0)
                 @discord.ui.button(label="🔁 Repeat Sensei's Audio", style=discord.ButtonStyle.secondary)
                 async def btn_repeat(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
-                    # 🟢 HIJACK PROTECTION FOR BUTTON
                     if btn_interaction.user.id != user.id:
-                        return await btn_interaction.response.send_message("❌ This is not your session!", ephemeral=True)
+                        return await btn_interaction.response.send_message("❌ This is not your session! Please start your own session.", ephemeral=True)
                     await btn_interaction.response.defer()
                     repeat_event.set()
 
             turn_view = TurnView()
             turn_msg = await channel.send(
-                content=f"🎤 **{user.mention}, IT'S YOUR TURN!**\nPlease send a **Voice Message (Voice Note)** within 120 seconds repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
+                content=f"🎤 **{user.mention}, IT'S YOUR TURN TO SPEAK AND RECORD!**\nPlease send a **Voice Note** within 2 minutes repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
                 view=turn_view
             )
             
-            # 🟢 HIJACK PROTECTION FOR AUDIO
             def check_voice_msg(m):
                 return m.author.id == user.id and m.channel.id == channel.id and m.attachments
                 
             msg_task = asyncio.create_task(client.wait_for('message', check=check_voice_msg))
             rep_task = asyncio.create_task(repeat_event.wait())
             
-            # Bot 120 seconds tak wait karega ya toh msg ka, ya Repeat button dabne ka
             done, pending = await asyncio.wait([msg_task, rep_task], timeout=120.0, return_when=asyncio.FIRST_COMPLETED)
             
             for p in pending: p.cancel()
             
             if rep_task in done:
-                # 🟢 USER CLICKED REPEAT (Queue Manipulation)
-                await turn_msg.edit(content=f"🔁 {user.mention} requested a repeat. Bot is rejoining VC...", view=None)
-                shadow_queues[guild.id].pop(0) # Remove current
-                shadow_queues[guild.id].insert(0, { # Re-insert at absolute FRONT with cached data
+                await turn_msg.edit(content=f"🔁 {user.mention} requested a repeat. Rejoining VC...", view=None)
+                shadow_queues[guild.id].pop(0)
+                shadow_queues[guild.id].insert(0, { 
                     "interaction": interaction,
                     "vc": vc_channel,
                     "topic": topic,
                     "level_short": level_short,
                     "saved_data": data
                 })
-                continue # Loop wapas upar jayega aur immediately process karega!
+                continue 
                 
             if not msg_task in done:
-                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 120 seconds! Session expired.", view=None)
+                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 2 minutes to upload! Session expired.", view=None)
                 shadow_queues[guild.id].pop(0)
                 continue
 
@@ -2262,11 +2257,10 @@ async def process_shadow_queue(guild, client):
                 shadow_queues[guild.id].pop(0)
                 continue
 
-            # 🟢 PRIVACY FEATURE: AUTO-DELETE USER'S AUDIO MESSAGE
+            # Auto-Delete User Audio for Privacy
             try: await msg.delete()
             except: pass
             
-            # Disable Repeat button once voice is submitted
             await turn_msg.edit(view=None)
 
             # 6. Download and Convert
@@ -2293,7 +2287,6 @@ async def process_shadow_queue(guild, client):
             embed.add_field(name="What We Heard", value=spoken_text, inline=False)
             embed.add_field(name="Pronunciation Accuracy", value=f"**{accuracy:.1f}%**", inline=False)
             
-            # 9. UI Buttons for Vocab and Grammar
             class ShadowSpeakingResultView(View):
                 def __init__(self, u, v_data, g_data):
                     super().__init__(timeout=None)
@@ -2327,11 +2320,60 @@ async def process_shadow_queue(guild, client):
             for f in [f"user_{user.id}.ogg", f"user_{user.id}.wav", f"sensei_{guild.id}.mp3"]:
                 if os.path.exists(f): os.remove(f)
             
-            # Agar queue update ho chuki hai (repeat dabne par) toh pop mat karo
             if shadow_queues.get(guild.id) and not (rep_task in done if 'rep_task' in locals() and 'done' in locals() else False):
                 shadow_queues[guild.id].pop(0)
                 
     shadow_processing[guild.id] = False
+
+
+class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
+    topic_input = discord.ui.TextInput(
+        label='What should Sensei talk about?',
+        style=discord.TextStyle.short,
+        placeholder='e.g., At a cafe, introducing myself, Anime...',
+        max_length=100
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        topic = self.topic_input.value
+        
+        user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
+        if not user_level_role:
+            return await interaction.response.send_message("❌ Please select a JLPT Learner role (N5-N1) first.", ephemeral=True)
+            
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return await interaction.response.send_message("❌ Please join a Voice Channel first! Sensei will speak there.", ephemeral=True)
+            
+        level_short = user_level_role.split(" ")[1]
+        vc_channel = interaction.user.voice.channel
+        guild_id = interaction.guild.id
+        
+        if guild_id not in shadow_queues:
+            shadow_queues[guild_id] = []
+            
+        for task in shadow_queues[guild_id]:
+            if task["interaction"].user.id == interaction.user.id:
+                return await interaction.response.send_message("⚠️ You are already in the queue! Please wait for your turn.", ephemeral=True)
+                
+        shadow_queues[guild_id].append({
+            "interaction": interaction,
+            "vc": vc_channel,
+            "topic": topic,
+            "level_short": level_short
+        })
+        
+        queue_position = len(shadow_queues[guild_id])
+        
+        if queue_position == 1 and not shadow_processing.get(guild_id, False):
+            await interaction.response.send_message(f"✅ Preparing your session about '{topic}'...", ephemeral=True)
+            asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
+        else:
+            queue_text = "".join([f"{idx + 1}. {task['interaction'].user.mention}\n" for idx, task in enumerate(shadow_queues[guild_id])])
+            embed = discord.Embed(title="🎙️ Speaking Queue", description=f"⏳ **Shadow Speaking Queue:**\n{queue_text}", color=0x3498db)
+            await interaction.response.send_message(f"✅ Added to queue. Position: {queue_position}", embed=embed)
+            
+            if not shadow_processing.get(guild_id, False):
+                asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
 
 
 class PersistentShadowPanelView(View):
@@ -2345,13 +2387,13 @@ class PersistentShadowPanelView(View):
     @discord.ui.button(label="❓ How it Works", style=discord.ButtonStyle.secondary, custom_id="shadow_help")
     async def btn_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         help_text = (
-            "**🎙️️ Shadow Speaking Guide:**\n\n"
+            "**🎙 Shadow Speaking Guide:**\n\n"
             "1. **Join any Voice Channel** in the server.\n"
             "2. Click **▶️ Start Shadowing** and type a topic you want to talk about.\n"
-            "3. AI Sensei will join your VC and speak a Japanese sentence based on your JLPT level.\n"
-            "4. Come back to this channel! You will have **2 minutes** to record and send a **Voice Note** repeating what Sensei said.\n"
-            "5. You can use Native Discord voice recorder (bottom left) or your Device's voice recorder.\n"
-            "6. Sensei will analyze your pronunciation and give you an accuracy score! Score doesn't affects `Leaderboard Score`.\n\n"
+            "3. AI Sensei will join your VC and speak a Japanese script based on your JLPT level.\n"
+            "4. Come back to this channel! You will have **120 seconds** to record and send a **Voice Note** repeating what Sensei said.\n"
+            "5. You can use Native Discord Recording (bottom left) or your Device's voice recording app and share the voice note in this chat.\n"
+            "6. Sensei will analyze your pronunciation and give you an accuracy score!\n\n"
             "*Pro Tip: Try to mimic the intonation and speed exactly as Sensei says it!*"
         )
         embed = discord.Embed(title="How to Shadow Speak", description=help_text, color=0x3498db)
@@ -2367,11 +2409,10 @@ async def setup_shadow(interaction: discord.Interaction):
         
     embed = discord.Embed(
         title="🎙️ A.I. SHADOW SPEAKING PANEL", 
-        description="Master your Japanese pronunciation and fluency!\n\nClick the **▶️ Start Shadowing** button below to spawn AI Sensei in your voice channel. Sensei will speak a sentence based on your topic, and you will repeat it using a Voice Note in this chat to get your accuracy score.", 
+        description="Master your Japanese pronunciation and fluency!\n\nClick the **▶️ Start Shadowing** button below to spawn AI Sensei in your voice channel. Sensei will speak a script based on your topic, and you will repeat it using a Voice Note in this chat to get your accuracy score.", 
         color=0x9b59b6
     )
     
     await interaction.channel.send(embed=embed, view=PersistentShadowPanelView())
     await interaction.followup.send("✅ Panel deployed successfully!", ephemeral=True)
-
 bot.run(os.environ.get("BOT_TOKEN"))
