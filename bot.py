@@ -1505,20 +1505,40 @@ class NihongoBot(commands.Bot):
         token_count = data["tokens"] if data else 0
         max_req = max(1500 * len(API_KEYS), 1)
         
-        # 🟢 Transparent & Spaced-out Aesthetic (RGBA)
-        width, height = 800, 250
-        # Transparent Background (0,0,0,0) - Only components will show!
+        from PIL import Image, ImageDraw, ImageFont
+        import io
+        
+        # 🟢 Transparent & Full-Width Aesthetic (RGBA)
+        width, height = 900, 300
+        # 100% Transparent Background - Discord ke native background ke sath blend hoga
         img = Image.new('RGBA', (width, height), color=(0, 0, 0, 0)) 
         draw = ImageDraw.Draw(img)
         
-        # Text settings (Spaced out over full width)
-        draw.text((30, 20), f"⚡ AI CORE TELEMETRY  |  PST Date: {today_pst}", fill=(226, 232, 240, 255))
-        draw.text((30, 70), f"Active API Keys: {len(API_KEYS)}", fill=(110, 231, 183, 255))
-        draw.text((30, 110), f"Daily Requests: {req_count} / {max_req}", fill=(253, 186, 116, 255))
-        draw.text((30, 150), f"Tokens Processed: {token_count:,}", fill=(147, 197, 253, 255))
+        # 🟢 Load Fonts (Pixel font for heading, Default for text)
+        try:
+            # Jo font humne abhi download kiya
+            pixel_font = ImageFont.truetype("pixel.ttf", 28)
+            # Default font size bada kiya
+            main_font = ImageFont.load_default()
+        except:
+            pixel_font = ImageFont.load_default()
+            main_font = ImageFont.load_default()
         
-        # Transparent Status Bar (Full Width)
-        bar_x, bar_y, bar_w, bar_h = 30, 195, 740, 30
+        # 🟢 Drawing the Pixel Heading
+        # Thoda drop-shadow effect ke liye pehle black mein draw karenge
+        draw.text((42, 22), "REALTIME A.I. TOKENS MONITOR", font=pixel_font, fill=(0, 0, 0, 200))
+        # Phir asli color upar draw karenge
+        draw.text((40, 20), "REALTIME A.I. TOKENS MONITOR", font=pixel_font, fill=(255, 255, 255, 255))
+        
+        # 🟢 Sub-Text (Larger & Spaced out)
+        # Using default font but writing it bigger by scaling or just simple text for now
+        draw.text((40, 80), f"⚡ PST Date: {today_pst}   |   Auto-refreshes every hour", fill=(148, 163, 184, 255))
+        draw.text((40, 120), f"Active API Keys: {len(API_KEYS)}", fill=(52, 211, 153, 255))
+        draw.text((40, 150), f"Daily Requests: {req_count} / {max_req}", fill=(251, 146, 60, 255))
+        draw.text((40, 180), f"Tokens Processed: {token_count:,}", fill=(96, 165, 250, 255))
+        
+        # 🟢 Transparent Status Bar (Full Width & Thicker)
+        bar_x, bar_y, bar_w, bar_h = 40, 220, 820, 35
         # Semi-transparent track (Background bar)
         draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(255, 255, 255, 30))
         
@@ -1526,54 +1546,25 @@ class NihongoBot(commands.Bot):
         fill_w = int(fill_ratio * bar_w)
         
         if fill_w > 0:
-            # Dynamic gradient-like colors based on usage, with 80% opacity
-            bar_color = (16, 185, 129, 200) if fill_ratio < 0.75 else (245, 158, 11, 200) if fill_ratio < 0.9 else (239, 68, 68, 200)
+            # Dynamic Glowing Bar
+            bar_color = (16, 185, 129, 220) if fill_ratio < 0.75 else (245, 158, 11, 220) if fill_ratio < 0.9 else (239, 68, 68, 220)
             draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], fill=bar_color)
             
         pct_text = f"{int(fill_ratio * 100)}%"
-        # Percentage text at the end of the bar
-        draw.text((bar_x + bar_w - 50, bar_y + 8), pct_text, fill=(255, 255, 255, 255))
+        # Percentage text
+        draw.text((bar_x + bar_w - 60, bar_y + 10), pct_text, fill=(255, 255, 255, 255))
         
         arr = io.BytesIO()
         img.save(arr, format='PNG')
         arr.seek(0)
         file = discord.File(arr, filename="tracker.png")
         
-        embed = discord.Embed(
-            title="📊 Realtime A.I. Tokens Monitor", 
-            description=f"Auto-refreshes every hour. Daily quota resets automatically at **Midnight PST**.\n`Status: Optimal`", 
-            color=0x2b6cb0
-        )
-        embed.set_image(url="attachment://tracker.png")
-        embed.set_footer(text="Nihongo Bot Infrastructure Monitoring")
-        
         try:
-            # Purge past status to keep channel clean
             await tracker_channel.purge(limit=3)
-            await tracker_channel.send(embed=embed, file=file)
+            # 🟢 THE FIX: Embed hata diya, ab sirf direct transparent image jayegi!
+            await tracker_channel.send(file=file)
         except Exception as e:
             print(f"Tracker Drop Error: {e}")
-
-        # 🟢 Is function se loop start hone se pehle bot ready hone ka wait karega
-    @ai_tracker_loop.before_loop
-    async def before_ai_tracker_loop(self):
-        await self.wait_until_ready()
-
-    #Bot will check every 10 mintes that if any VC created by /vc command is 8 hours old or not.
-    @tasks.loop(minutes=10)
-    async def vc_cleanup_loop(self):
-        for guild in self.guilds:
-            category = discord.utils.get(guild.categories, name="📣 ボイソ・チャト")
-            if not category:
-                continue
-                
-            for vc in category.voice_channels:
-                # Bot check karega ki VC ko bane hue 8 ghante (8 hours) ho gaye hain ya nahi
-                if discord.utils.utcnow() - vc.created_at > timedelta(hours=8):
-                    try:
-                        await vc.delete(reason="8 hour auto-delete limit reached.")
-                    except Exception as e:
-                        print(f"Failed to delete VC: {e}")
 
 bot = NihongoBot()
 
