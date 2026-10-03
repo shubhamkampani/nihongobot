@@ -1514,31 +1514,28 @@ class NihongoBot(commands.Bot):
         img = Image.new('RGBA', (width, height), color=(0, 0, 0, 0)) 
         draw = ImageDraw.Draw(img)
         
-        # 🟢 Load Fonts (Pixel font for heading, Default for text)
+        # 🟢 Load Fonts (Pixel font for heading & Subtext)
         try:
-            # Jo font humne abhi download kiya
-            pixel_font = ImageFont.truetype("pixel.ttf", 28)
-            # Default font size bada kiya
-            main_font = ImageFont.load_default()
+            # Bada font Heading ke liye
+            pixel_font_large = ImageFont.truetype("pixel.ttf", 32)
+            # Chota font baaki lines ke liye
+            pixel_font_small = ImageFont.truetype("pixel.ttf", 16)
         except:
-            pixel_font = ImageFont.load_default()
-            main_font = ImageFont.load_default()
+            pixel_font_large = ImageFont.load_default()
+            pixel_font_small = ImageFont.load_default()
         
         # 🟢 Drawing the Pixel Heading
-        # Thoda drop-shadow effect ke liye pehle black mein draw karenge
-        draw.text((42, 22), "REALTIME A.I. TOKENS MONITOR", font=pixel_font, fill=(0, 0, 0, 200))
-        # Phir asli color upar draw karenge
-        draw.text((40, 20), "REALTIME A.I. TOKENS MONITOR", font=pixel_font, fill=(255, 255, 255, 255))
+        draw.text((42, 22), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(0, 0, 0, 200))
+        draw.text((40, 20), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(255, 255, 255, 255))
         
-        # 🟢 Sub-Text (Larger & Spaced out)
-        # Using default font but writing it bigger by scaling or just simple text for now
-        draw.text((40, 80), f"⚡ PST Date: {today_pst}   |   Auto-refreshes every hour", fill=(148, 163, 184, 255))
-        draw.text((40, 120), f"Active API Keys: {len(API_KEYS)}", fill=(52, 211, 153, 255))
-        draw.text((40, 150), f"Daily Requests: {req_count} / {max_req}", fill=(251, 146, 60, 255))
-        draw.text((40, 180), f"Tokens Processed: {token_count:,}", fill=(96, 165, 250, 255))
+        # 🟢 Sub-Text (Ab Pixel Font aur Bade Size mein)
+        draw.text((40, 85), f"⚡ PST Date: {today_pst}   |   Auto-refreshes every hour", font=pixel_font_small, fill=(148, 163, 184, 255))
+        draw.text((40, 125), f"Active API Keys: {len(API_KEYS)}", font=pixel_font_small, fill=(52, 211, 153, 255))
+        draw.text((40, 155), f"Daily Requests: {req_count} / {max_req}", font=pixel_font_small, fill=(251, 146, 60, 255))
+        draw.text((40, 185), f"Tokens Processed: {token_count:,}", font=pixel_font_small, fill=(96, 165, 250, 255))
         
         # 🟢 Transparent Status Bar (Full Width & Thicker)
-        bar_x, bar_y, bar_w, bar_h = 40, 220, 820, 35
+        bar_x, bar_y, bar_w, bar_h = 40, 225, 820, 35
         # Semi-transparent track (Background bar)
         draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(255, 255, 255, 30))
         
@@ -1552,7 +1549,7 @@ class NihongoBot(commands.Bot):
             
         pct_text = f"{int(fill_ratio * 100)}%"
         # Percentage text
-        draw.text((bar_x + bar_w - 60, bar_y + 10), pct_text, fill=(255, 255, 255, 255))
+        draw.text((bar_x + bar_w - 60, bar_y + 10), pct_text, font=pixel_font_small, fill=(255, 255, 255, 255))
         
         arr = io.BytesIO()
         img.save(arr, format='PNG')
@@ -1561,7 +1558,7 @@ class NihongoBot(commands.Bot):
         
         try:
             await tracker_channel.purge(limit=3)
-            # 🟢 THE FIX: Embed hata diya, ab sirf direct transparent image jayegi!
+            # Direct transparent image
             await tracker_channel.send(file=file)
         except Exception as e:
             print(f"Tracker Drop Error: {e}")
