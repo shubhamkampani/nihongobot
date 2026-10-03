@@ -1508,48 +1508,46 @@ class NihongoBot(commands.Bot):
         from PIL import Image, ImageDraw, ImageFont
         import io
         
-        # 🟢 Transparent & Full-Width Aesthetic (RGBA)
-        width, height = 900, 300
-        # 100% Transparent Background - Discord ke native background ke sath blend hoga
+        # 🟢 Transparent & Ultra-Wide Aesthetic (RGBA)
+        width, height = 1100, 380
         img = Image.new('RGBA', (width, height), color=(0, 0, 0, 0)) 
         draw = ImageDraw.Draw(img)
         
-        # 🟢 Load Fonts (Pixel font for heading & Subtext)
+        # 🟢 Load Fonts (Dono ke liye Pixel Font but Massive Sizes)
         try:
-            # Bada font Heading ke liye
-            pixel_font_large = ImageFont.truetype("pixel.ttf", 32)
-            # Chota font baaki lines ke liye
-            pixel_font_small = ImageFont.truetype("pixel.ttf", 16)
+            # Heading ke liye 36px (aur bada)
+            pixel_font_large = ImageFont.truetype("pixel.ttf", 36)
+            # Niche ke text ke liye 22px (Pehle 16 tha, ab bold aur clear lagega)
+            pixel_font_small = ImageFont.truetype("pixel.ttf", 22)
         except:
             pixel_font_large = ImageFont.load_default()
             pixel_font_small = ImageFont.load_default()
         
-        # 🟢 Drawing the Pixel Heading
-        draw.text((42, 22), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(0, 0, 0, 200))
-        draw.text((40, 20), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(255, 255, 255, 255))
+        # 🟢 Drawing the Pixel Heading (Left margin thoda kam kiya taaki sab fit ho)
+        draw.text((32, 22), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(0, 0, 0, 200))
+        draw.text((30, 20), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(255, 255, 255, 255))
         
-        # 🟢 Sub-Text (Ab Pixel Font aur Bade Size mein)
-        draw.text((40, 85), f"⚡ PST Date: {today_pst}   |   Auto-refreshes every hour", font=pixel_font_small, fill=(148, 163, 184, 255))
-        draw.text((40, 125), f"Active API Keys: {len(API_KEYS)}", font=pixel_font_small, fill=(52, 211, 153, 255))
-        draw.text((40, 155), f"Daily Requests: {req_count} / {max_req}", font=pixel_font_small, fill=(251, 146, 60, 255))
-        draw.text((40, 185), f"Tokens Processed: {token_count:,}", font=pixel_font_small, fill=(96, 165, 250, 255))
+        # 🟢 Sub-Text (Ab Bada, Bold aur Zada Spacing ke sath)
+        draw.text((30, 100), f"⚡ PST Date: {today_pst}   |   Auto-refreshes every hour", font=pixel_font_small, fill=(148, 163, 184, 255))
+        draw.text((30, 150), f"Active API Keys: {len(API_KEYS)}", font=pixel_font_small, fill=(52, 211, 153, 255))
+        draw.text((30, 190), f"Daily Requests: {req_count} / {max_req}", font=pixel_font_small, fill=(251, 146, 60, 255))
+        draw.text((30, 230), f"Tokens Processed: {token_count:,}", font=pixel_font_small, fill=(96, 165, 250, 255))
         
-        # 🟢 Transparent Status Bar (Full Width & Thicker)
-        bar_x, bar_y, bar_w, bar_h = 40, 225, 820, 35
-        # Semi-transparent track (Background bar)
+        # 🟢 Transparent Status Bar (Aur Zada Wide & Thick)
+        bar_x, bar_y, bar_w, bar_h = 30, 280, 1040, 45
         draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(255, 255, 255, 30))
         
         fill_ratio = min(req_count / max_req, 1.0) if max_req > 0 else 0
         fill_w = int(fill_ratio * bar_w)
         
         if fill_w > 0:
-            # Dynamic Glowing Bar
+            # Glowing Bar
             bar_color = (16, 185, 129, 220) if fill_ratio < 0.75 else (245, 158, 11, 220) if fill_ratio < 0.9 else (239, 68, 68, 220)
             draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], fill=bar_color)
             
         pct_text = f"{int(fill_ratio * 100)}%"
-        # Percentage text
-        draw.text((bar_x + bar_w - 60, bar_y + 10), pct_text, font=pixel_font_small, fill=(255, 255, 255, 255))
+        # Percentage text ko center-align kiya bar ke andar!
+        draw.text((bar_x + bar_w - 70, bar_y + 12), pct_text, font=pixel_font_small, fill=(255, 255, 255, 255))
         
         arr = io.BytesIO()
         img.save(arr, format='PNG')
@@ -1558,7 +1556,6 @@ class NihongoBot(commands.Bot):
         
         try:
             await tracker_channel.purge(limit=3)
-            # Direct transparent image
             await tracker_channel.send(file=file)
         except Exception as e:
             print(f"Tracker Drop Error: {e}")
