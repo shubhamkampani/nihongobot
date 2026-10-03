@@ -1479,12 +1479,6 @@ class NihongoBot(commands.Bot):
                     print(f"Error deleting ticket channel: {e}")
 
 
-
-    # 🟢 Is function se loop start hone se pehle bot ready hone ka wait karega
-    @ai_tracker_loop.before_loop
-    async def before_ai_tracker_loop(self):
-        await self.wait_until_ready()
-
     # 🟢 1-Hour Token Tracker Image Loop (0 API Tokens Used)
     @tasks.loop(hours=1)
     async def ai_tracker_loop(self):
@@ -1553,6 +1547,11 @@ class NihongoBot(commands.Bot):
             await tracker_channel.send(embed=embed, file=file)
         except Exception as e:
             print(f"Tracker Drop Error: {e}")
+
+        # 🟢 Is function se loop start hone se pehle bot ready hone ka wait karega
+    @ai_tracker_loop.before_loop
+    async def before_ai_tracker_loop(self):
+        await self.wait_until_ready()
 
     #Bot will check every 10 mintes that if any VC created by /vc command is 8 hours old or not.
     @tasks.loop(minutes=10)
