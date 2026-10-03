@@ -5,3 +5,7 @@ Pillow
 pytz
 aiohttp
 gTTS
+discord-ext-voice-recv
+SpeechRecognition
+pydub
+PyNaCl
