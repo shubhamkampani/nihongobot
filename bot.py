@@ -1505,28 +1505,34 @@ class NihongoBot(commands.Bot):
         token_count = data["tokens"] if data else 0
         max_req = max(1500 * len(API_KEYS), 1)
         
-        # 🟢 Pillow Image Generation
-        width, height = 640, 220
-        img = Image.new('RGB', (width, height), color=(26, 32, 44))
+        # 🟢 Transparent & Spaced-out Aesthetic (RGBA)
+        width, height = 800, 250
+        # Transparent Background (0,0,0,0) - Only components will show!
+        img = Image.new('RGBA', (width, height), color=(0, 0, 0, 0)) 
         draw = ImageDraw.Draw(img)
         
-        draw.text((25, 20), f"⚡ AI CORE TELEMETRY  |  PST Date: {today_pst}", fill=(226, 232, 240))
-        draw.text((25, 55), f"Active API Keys: {len(API_KEYS)}", fill=(72, 187, 120))
-        draw.text((25, 85), f"Daily Requests Used: {req_count} / {max_req}", fill=(237, 137, 54))
-        draw.text((25, 115), f"Tokens Processed: {token_count:,}", fill=(99, 179, 237))
+        # Text settings (Spaced out over full width)
+        draw.text((30, 20), f"⚡ AI CORE TELEMETRY  |  PST Date: {today_pst}", fill=(226, 232, 240, 255))
+        draw.text((30, 70), f"Active API Keys: {len(API_KEYS)}", fill=(110, 231, 183, 255))
+        draw.text((30, 110), f"Daily Requests: {req_count} / {max_req}", fill=(253, 186, 116, 255))
+        draw.text((30, 150), f"Tokens Processed: {token_count:,}", fill=(147, 197, 253, 255))
         
-        # Progress Bar
-        bar_x, bar_y, bar_w, bar_h = 25, 155, 590, 28
-        draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(45, 55, 72))
+        # Transparent Status Bar (Full Width)
+        bar_x, bar_y, bar_w, bar_h = 30, 195, 740, 30
+        # Semi-transparent track (Background bar)
+        draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(255, 255, 255, 30))
         
-        fill_ratio = min(req_count / max_req, 1.0)
+        fill_ratio = min(req_count / max_req, 1.0) if max_req > 0 else 0
         fill_w = int(fill_ratio * bar_w)
+        
         if fill_w > 0:
-            bar_color = (72, 187, 120) if fill_ratio < 0.75 else (237, 137, 54) if fill_ratio < 0.9 else (245, 101, 101)
+            # Dynamic gradient-like colors based on usage, with 80% opacity
+            bar_color = (16, 185, 129, 200) if fill_ratio < 0.75 else (245, 158, 11, 200) if fill_ratio < 0.9 else (239, 68, 68, 200)
             draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], fill=bar_color)
             
         pct_text = f"{int(fill_ratio * 100)}%"
-        draw.text((bar_x + bar_w - 45, bar_y + 7), pct_text, fill=(255, 255, 255))
+        # Percentage text at the end of the bar
+        draw.text((bar_x + bar_w - 50, bar_y + 8), pct_text, fill=(255, 255, 255, 255))
         
         arr = io.BytesIO()
         img.save(arr, format='PNG')
@@ -1949,6 +1955,22 @@ async def setup_tickets(interaction: discord.Interaction):
     
     await interaction.channel.send(embed=embed, view=PersistentTicketPanelView())
     await interaction.followup.send("✅ Ticket panel deployed successfully!", ephemeral=True)
+
+@bot.tree.command(name="dropdokkai", description="[Admin] Manually trigger Missed Dokkai Drop.")
+async def manual_dokkai(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # 🟢 Sirf Admins/Founders chala payenge
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied. Only Admins can trigger this.", ephemeral=True)
+        
+    await interaction.followup.send("⏳ Dropping today's Dokkai manually across all channels...", ephemeral=True)
+    
+    # Calling the exact same background function we use for the daily drop
+    await bot.drop_freemium_dokkai_task()
+    
+    await interaction.followup.send("✅ Dokkai Drop successfully completed!", ephemeral=True)
 
 #Announce command for admin announcement in server
 @bot.tree.command(name="announce", description="[Admin Only] Send an official announcement in the current channel.")
