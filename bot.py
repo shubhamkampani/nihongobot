@@ -1549,7 +1549,7 @@ class NihongoBot(commands.Bot):
             
         pct_text = f"{int(fill_ratio * 100)}%"
         # Percentage text ko center-align kiya bar ke andar!
-        draw.text((bar_x + bar_w - 70, bar_y + 12), pct_text, font=pixel_font_small, fill=(255, 255, 255, 255))
+        draw.text((bar_x + bar_w - 70, bar_y + 12), pct_text, font=pixel_font_medium, fill=(255, 255, 255, 255))
         
         arr = io.BytesIO()
         img.save(arr, format='PNG')
