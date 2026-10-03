@@ -1513,25 +1513,27 @@ class NihongoBot(commands.Bot):
         img = Image.new('RGBA', (width, height), color=(0, 0, 0, 0)) 
         draw = ImageDraw.Draw(img)
         
-        # 🟢 Load Fonts (Dono ke liye Pixel Font but Massive Sizes)
+        # 🟢 Load Fonts (3 Sizes for perfect hierarchy)
         try:
-            # Heading ke liye 36px (aur bada)
-            pixel_font_large = ImageFont.truetype("pixel.ttf", 36)
-            # Niche ke text ke liye 22px (Pehle 16 tha, ab bold aur clear lagega)
-            pixel_font_small = ImageFont.truetype("pixel.ttf", 22)
+            pixel_font_large = ImageFont.truetype("pixel.ttf", 36) # Heading
+            pixel_font_medium = ImageFont.truetype("pixel.ttf", 24) # Main Data
+            pixel_font_tiny = ImageFont.truetype("pixel.ttf", 14)  # PST Line
         except:
             pixel_font_large = ImageFont.load_default()
-            pixel_font_small = ImageFont.load_default()
+            pixel_font_medium = ImageFont.load_default()
+            pixel_font_tiny = ImageFont.load_default()
         
-        # 🟢 Drawing the Pixel Heading (Left margin thoda kam kiya taaki sab fit ho)
+        # 🟢 Drawing the Pixel Heading
         draw.text((32, 22), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(0, 0, 0, 200))
         draw.text((30, 20), "REALTIME A.I. TOKENS MONITOR", font=pixel_font_large, fill=(255, 255, 255, 255))
         
-        # 🟢 Sub-Text (Ab Bada, Bold aur Zada Spacing ke sath)
-        draw.text((30, 100), f"⚡ PST Date: {today_pst}   |   Auto-refreshes every hour", font=pixel_font_small, fill=(148, 163, 184, 255))
-        draw.text((30, 150), f"Active API Keys: {len(API_KEYS)}", font=pixel_font_small, fill=(52, 211, 153, 255))
-        draw.text((30, 190), f"Daily Requests: {req_count} / {max_req}", font=pixel_font_small, fill=(251, 146, 60, 255))
-        draw.text((30, 230), f"Tokens Processed: {token_count:,}", font=pixel_font_small, fill=(96, 165, 250, 255))
+        # 🟢 PST Line (Normal size)
+        draw.text((30, 85), f"⚡ PST Date: {today_pst}   |   Auto-Refresh every 1 hour", font=pixel_font_tiny, fill=(148, 163, 184, 255))
+        
+        # 🟢 Main Data (Bada aur Bold)
+        draw.text((30, 130), f"Active API Keys: {len(API_KEYS)}", font=pixel_font_medium, fill=(52, 211, 153, 255))
+        draw.text((30, 175), f"Daily Requests: {req_count} / {max_req}", font=pixel_font_medium, fill=(251, 146, 60, 255))
+        draw.text((30, 220), f"Tokens Processed: {token_count:,}", font=pixel_font_medium, fill=(96, 165, 250, 255))
         
         # 🟢 Transparent Status Bar (Aur Zada Wide & Thick)
         bar_x, bar_y, bar_w, bar_h = 30, 280, 1040, 45
