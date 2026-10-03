@@ -2141,13 +2141,6 @@ async def manage_vc(interaction: discord.Interaction, action: app_commands.Choic
 # ==========================================
 # 🎙️ SHADOW SPEAKING (OPTION B + UI PANEL + REPEAT PRIORITY)
 # ==========================================
-shadow_queues = {}
-shadow_processing = {}
-
-def check_accuracy(original, spoken):
-    if not spoken: return 0.0
-    return SequenceMatcher(None, original, spoken).ratio() * 100
-
 async def process_shadow_queue(guild, client):
     shadow_processing[guild.id] = True
     
@@ -2163,11 +2156,10 @@ async def process_shadow_queue(guild, client):
         
         try:
             if not saved_data:
-                # 1. Fetch AI Data (Level Specific Grammar & 2-3 Lines)
                 await channel.send(f"⏳ **{user.mention}, your Shadow Speaking session is starting in {vc_channel.name}!** Generating {level_short} script...", delete_after=10)
                 
                 prompt = f"""You are a Japanese Sensei. 
-                Task: Generate a natural Japanese monologue (strictly 2 to 3 sentences long) about '{topic}'.
+                Task: Generate a natural Japanese monologue (strictly 2 sentence long) about '{topic}'.
                 Constraint: You MUST strictly incorporate grammar points that are specifically introduced at the JLPT {level_short} level (e.g., if N4, use specific N4 grammar patterns only). Keep vocabulary at {level_short} level.
                 Return ONLY a valid JSON with keys: 
                 "sentence" (Japanese text with kanji/kana), 
@@ -2212,13 +2204,13 @@ async def process_shadow_queue(guild, client):
                 @discord.ui.button(label="🔁 Repeat Sensei's Audio", style=discord.ButtonStyle.secondary)
                 async def btn_repeat(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
                     if btn_interaction.user.id != user.id:
-                        return await btn_interaction.response.send_message("❌ This is not your session! Please start your own session.", ephemeral=True)
+                        return await btn_interaction.response.send_message("❌ This is not your session!", ephemeral=True)
                     await btn_interaction.response.defer()
                     repeat_event.set()
 
             turn_view = TurnView()
             turn_msg = await channel.send(
-                content=f"🎤 **{user.mention}, IT'S YOUR TURN TO SPEAK AND RECORD!**\nPlease send a **Voice Note** within 2 minutes repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
+                content=f"🎤 **{user.mention}, IT'S YOUR TURN!**\nPlease send a **Voice Note OR Audio File (.mp3, .wav, .m4a)** within 120 seconds repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
                 view=turn_view
             )
             
@@ -2245,15 +2237,22 @@ async def process_shadow_queue(guild, client):
                 continue 
                 
             if not msg_task in done:
-                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 2 minutes to upload! Session expired.", view=None)
+                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 120 seconds! Session expired.", view=None)
                 shadow_queues[guild.id].pop(0)
                 continue
 
             msg = msg_task.result()
             attachment = msg.attachments[0]
             
-            if 'ogg' not in attachment.filename.lower() and 'voice-message' not in attachment.filename.lower():
-                await channel.send(f"❌ {user.mention}, please use Discord's built-in Voice Message feature.")
+            # 🟢 NAYA LOGIC: Support for Multiple Audio Formats
+            filename_lower = attachment.filename.lower()
+            valid_extensions = ['.ogg', '.wav', '.mp3', '.m4a']
+            
+            # Agar file ka extension theek hai, ya wo discord mobile ka voice note hai
+            is_valid_audio = ('voice-message' in filename_lower) or any(filename_lower.endswith(ext) for ext in valid_extensions)
+            
+            if not is_valid_audio:
+                await channel.send(f"❌ {user.mention}, please send a valid audio file (.mp3, .wav, .m4a, .ogg) or a Discord Voice Note.")
                 shadow_queues[guild.id].pop(0)
                 continue
 
@@ -2263,12 +2262,15 @@ async def process_shadow_queue(guild, client):
             
             await turn_msg.edit(view=None)
 
-            # 6. Download and Convert
-            ogg_file = f"user_{user.id}.ogg"
+            # 6. Download and Convert smart dynamic extension
+            ext = os.path.splitext(attachment.filename)[1].lower()
+            if not ext: ext = ".ogg"
+            
+            raw_audio_file = f"user_{user.id}_raw{ext}"
             wav_file = f"user_{user.id}.wav"
             
-            await attachment.save(ogg_file)
-            audio = AudioSegment.from_file(ogg_file)
+            await attachment.save(raw_audio_file)
+            audio = AudioSegment.from_file(raw_audio_file)
             audio.export(wav_file, format="wav")
             
             # 7. STT & Evaluate
@@ -2311,13 +2313,18 @@ async def process_shadow_queue(guild, client):
             await channel.send(content=user.mention, embed=embed, view=view)
             
         except sr.UnknownValueError:
-            await channel.send(f"❌ {user.mention}, I couldn't hear your voice message clearly. Try again.")
+            await channel.send(f"❌ {user.mention}, I couldn't hear your voice clearly in the audio file. Try again with less background noise.")
         except Exception as e:
             await channel.send(f"❌ An error occurred: {e}")
             if 'voice_client' in locals() and voice_client and voice_client.is_connected():
                 await voice_client.disconnect()
         finally:
-            for f in [f"user_{user.id}.ogg", f"user_{user.id}.wav", f"sensei_{guild.id}.mp3"]:
+            # 🟢 Smart Cleanup: Deletes all variations of generated files to save storage space
+            cleanup_files = [f"user_{user.id}.wav", f"sensei_{guild.id}.mp3"]
+            for possible_ext in ['.ogg', '.wav', '.mp3', '.m4a']:
+                cleanup_files.append(f"user_{user.id}_raw{possible_ext}")
+                
+            for f in cleanup_files:
                 if os.path.exists(f): os.remove(f)
             
             if shadow_queues.get(guild.id) and not (rep_task in done if 'rep_task' in locals() and 'done' in locals() else False):
@@ -2416,3 +2423,4 @@ async def setup_shadow(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=PersistentShadowPanelView())
     await interaction.followup.send("✅ Panel deployed successfully!", ephemeral=True)
 bot.run(os.environ.get("BOT_TOKEN"))
+
