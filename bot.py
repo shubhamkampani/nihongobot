@@ -1566,6 +1566,10 @@ class NihongoBot(commands.Bot):
         except Exception as e:
             print(f"Tracker Drop Error: {e}")
 
+    @ai_tracker_loop.before_loop
+    async def before_ai_tracker_loop(self):
+        await self.wait_until_ready()
+
     # 🟢 VC Cleanup Loop
     @tasks.loop(minutes=10)
     async def vc_cleanup_loop(self):
