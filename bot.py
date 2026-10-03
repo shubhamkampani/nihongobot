@@ -298,8 +298,15 @@ async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit
     3. Each question MUST have exactly one blank space represented by '___'.
     4. Use Furigana in brackets after all Kanji in questions and options (e.g., 漢字【かんじ】).
     5. The 4 options (A, B, C, D) must be logically distinct, but ONLY ONE fits.
-    6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Do not use single quotes. Do not add trailing commas.
-    Output ONLY a valid JSON array of objects."""
+    6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Output ONLY a valid JSON array of objects.
+    
+    Output format must EXACTLY match this structure:
+    [{
+        "question": "...",
+        "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
+        "answer": "A",
+        "explanation": "Provide a very brief 1-liner English explanation of why this answer is grammatically or semantically correct."
+    }]"""
     
     raw_text = await generate_gemini_response(prompt)
     questions_data = extract_json(raw_text)
@@ -387,7 +394,9 @@ class QuizView(View):
             # 🟢 NAYA LOGIC: Detailed Ephemeral Explanation
             has_explanations = any("explanation" in q for q in self.questions)
             if has_explanations:
-                exp_embed = discord.Embed(title="📖 Listening Review & Explanations", color=0x3498db)
+                # 🟢 NAYA LOGIC: Title ab dynamic hoga
+                quiz_type = "Listening" if "Listening" in self.level else "Mock Test"
+                exp_embed = discord.Embed(title=f"📖 {quiz_type} Review & Explanations", color=0x3498db)
                 for i, q in enumerate(self.questions):
                     user_ans = self.user_choices[i]
                     correct_ans = q['answer']
