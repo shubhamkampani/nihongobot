@@ -1,7 +1,6 @@
 discord.py[voice]
 Flask
 pymongo
-Pillow
 pytz
 aiohttp
 gTTS
