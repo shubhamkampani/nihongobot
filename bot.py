@@ -2141,6 +2141,13 @@ async def manage_vc(interaction: discord.Interaction, action: app_commands.Choic
 # ==========================================
 # 🎙️ SHADOW SPEAKING (OPTION B + UI PANEL + REPEAT PRIORITY)
 # ==========================================
+shadow_queues = {}
+shadow_processing = {}
+
+def check_accuracy(original, spoken):
+    if not spoken: return 0.0
+    return SequenceMatcher(None, original, spoken).ratio() * 100
+
 async def process_shadow_queue(guild, client):
     shadow_processing[guild.id] = True
     
@@ -2387,7 +2394,7 @@ class PersistentShadowPanelView(View):
     def __init__(self):
         super().__init__(timeout=None)
         
-    @discord.ui.button(label="▶️ Start Shadowing", style=discord.ButtonStyle.success, custom_id="shadow_start")
+    @discord.ui.button(label="▶️ Start Shadow Speaking", style=discord.ButtonStyle.success, custom_id="shadow_start")
     async def btn_start(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ShadowTopicModal())
         
@@ -2396,7 +2403,7 @@ class PersistentShadowPanelView(View):
         help_text = (
             "**🎙 Shadow Speaking Guide:**\n\n"
             "1. **Join any Voice Channel** in the server.\n"
-            "2. Click **▶️ Start Shadowing** and type a topic you want to talk about.\n"
+            "2. Click **▶️ Start Shadow Speaking** and type a topic you want to talk about.\n"
             "3. AI Sensei will join your VC and speak a Japanese script based on your JLPT level.\n"
             "4. Come back to this channel! You will have **120 seconds** to record and send a **Voice Note** repeating what Sensei said.\n"
             "5. You can use Native Discord Recording (bottom left) or your Device's voice recording app and share the voice note in this chat.\n"
