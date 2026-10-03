@@ -36,9 +36,22 @@ try:
     db = cluster["nihongo_db"]
     quiz_db = db["weekly_scores"]
     kanji_db = db["kanji_tracker"]
+    # 🟢 Token Tracking Collection
+    token_db = db["api_tokens"]
     print("✅ MongoDB Connected!")
 except Exception as e:
     print(f"❌ MongoDB Error: {e}")
+
+# 🟢 API Key Rotation Setup
+API_KEYS = []
+for i in range(1, 20):
+    k = os.environ.get(f"GEMINI_API_KEY_{i}")
+    if k: 
+        API_KEYS.append(k.strip())
+if not API_KEYS and os.environ.get("GEMINI_API_KEY"):
+    API_KEYS.append(os.environ.get("GEMINI_API_KEY").strip())
+
+CURRENT_KEY_INDEX = 0
 
 # --- 🎌 ROLE CONSTANTS ---
 ROLE_NAMES = ["📍 N5 Beginner", "📍 N4 Elementary", "📍 N3 Intermediate", "📍 N2 Pre-Advanced", "📍 N1 Advanced"]
@@ -97,36 +110,51 @@ def extract_json(raw_text):
 
 # --- 🧠 DIRECT GEMINI REST API ---
 async def generate_gemini_response(prompt):
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key: 
-        raise Exception("GEMINI_API_KEY missing from Environment!")
-    
-    clean_key = api_key.strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={clean_key}"
+    global CURRENT_KEY_INDEX
+    if not API_KEYS: 
+        raise Exception("No GEMINI_API_KEY found in .env!")
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.5,
-            "maxOutputTokens": 6000
-        }
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 6000}
     }
     headers = {"Content-Type": "application/json"}
-    
     backoff_times = [1, 2, 4, 8]
+    
     async with aiohttp.ClientSession() as session:
         for attempt, wait_time in enumerate(backoff_times + [0]):
+            current_key = API_KEYS[CURRENT_KEY_INDEX]
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={current_key}"
+            
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    
+                    # 🟢 Usage Tracking to MongoDB (PST Midnight Reset Friendly)
+                    try:
+                        usage = data.get('usageMetadata', {})
+                        total_tokens = usage.get('totalTokenCount', 0)
+                        
+                        today_pst = datetime.now(pytz.timezone('US/Pacific')).strftime("%Y-%m-%d")
+                        token_db.update_one(
+                            {"date": today_pst}, 
+                            {"$inc": {"requests": 1, "tokens": total_tokens}}, 
+                            upsert=True
+                        )
+                    except Exception as e:
+                        print(f"Token Tracking Error: {e}")
+                        
                     try: 
                         return data['candidates'][0]['content']['parts'][0]['text']
-                    except (KeyError, IndexError): 
+                    except: 
                         raise Exception("API returned invalid structure.")
-                elif resp.status == 429 and attempt < len(backoff_times):
-                    print(f"⚠️ API Rate Limit Hit (429). Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                    continue
+                    
+                elif resp.status == 429:
+                    print(f"⚠️ Key {CURRENT_KEY_INDEX + 1} Limit Hit (429)! Rotating Key...")
+                    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
+                    if attempt < len(backoff_times):
+                        await asyncio.sleep(wait_time)
+                        continue
                 else:
                     err_text = await resp.text()
                     raise Exception(f"HTTP {resp.status}: {err_text}")
@@ -1174,6 +1202,7 @@ class NihongoBot(commands.Bot):
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         self.add_view(view)
+        self.ai_tracker_loop.start()
         self.vc_cleanup_loop.start()
         await self.tree.sync()
         print("✅ Commands Synced & Tasks Started.")
@@ -1448,6 +1477,82 @@ class NihongoBot(commands.Bot):
                         await channel.delete(reason="Ticket auto-deletion after 48 hours.")
                 except Exception as e:
                     print(f"Error deleting ticket channel: {e}")
+
+
+
+    # 🟢 Is function se loop start hone se pehle bot ready hone ka wait karega
+    @ai_tracker_loop.before_loop
+    async def before_ai_tracker_loop(self):
+        await self.wait_until_ready()
+
+    # 🟢 1-Hour Token Tracker Image Loop (0 API Tokens Used)
+    @tasks.loop(hours=1)
+    async def ai_tracker_loop(self):
+        tracker_channel = None
+        for guild in self.guilds:
+            tracker_channel = discord.utils.find(lambda c: "ai-token-tracker" in c.name.lower(), guild.channels)
+            if tracker_channel: 
+                break
+            
+        if not tracker_channel: 
+            return
+
+        from PIL import Image, ImageDraw
+        import io
+        
+        today_pst = datetime.now(pytz.timezone('US/Pacific')).strftime("%Y-%m-%d")
+        data = token_db.find_one({"date": today_pst})
+        
+        # 🟢 AUTO-CLEANUP: AI BOT TOKEN TRACKER DATA AUTO-DELETE AFTER 7 DAYS FROM MongoDB
+        seven_days_ago = (datetime.now(pytz.timezone('US/Pacific')) - timedelta(days=7)).strftime("%Y-%m-%d")
+        token_db.delete_many({"date": {"$lt": seven_days_ago}})
+        
+        req_count = data["requests"] if data else 0
+        token_count = data["tokens"] if data else 0
+        max_req = max(1500 * len(API_KEYS), 1)
+        
+        # 🟢 Pillow Image Generation
+        width, height = 640, 220
+        img = Image.new('RGB', (width, height), color=(26, 32, 44))
+        draw = ImageDraw.Draw(img)
+        
+        draw.text((25, 20), f"⚡ AI CORE TELEMETRY  |  PST Date: {today_pst}", fill=(226, 232, 240))
+        draw.text((25, 55), f"Active API Keys: {len(API_KEYS)}", fill=(72, 187, 120))
+        draw.text((25, 85), f"Daily Requests Used: {req_count} / {max_req}", fill=(237, 137, 54))
+        draw.text((25, 115), f"Tokens Processed: {token_count:,}", fill=(99, 179, 237))
+        
+        # Progress Bar
+        bar_x, bar_y, bar_w, bar_h = 25, 155, 590, 28
+        draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(45, 55, 72))
+        
+        fill_ratio = min(req_count / max_req, 1.0)
+        fill_w = int(fill_ratio * bar_w)
+        if fill_w > 0:
+            bar_color = (72, 187, 120) if fill_ratio < 0.75 else (237, 137, 54) if fill_ratio < 0.9 else (245, 101, 101)
+            draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], fill=bar_color)
+            
+        pct_text = f"{int(fill_ratio * 100)}%"
+        draw.text((bar_x + bar_w - 45, bar_y + 7), pct_text, fill=(255, 255, 255))
+        
+        arr = io.BytesIO()
+        img.save(arr, format='PNG')
+        arr.seek(0)
+        file = discord.File(arr, filename="tracker.png")
+        
+        embed = discord.Embed(
+            title="📊 Realtime A.I. Tokens Monitor", 
+            description=f"Auto-refreshes every hour. Daily quota resets automatically at **Midnight PST**.\n`Status: Optimal`", 
+            color=0x2b6cb0
+        )
+        embed.set_image(url="attachment://tracker.png")
+        embed.set_footer(text="Nihongo Bot Infrastructure Monitoring")
+        
+        try:
+            # Purge past status to keep channel clean
+            await tracker_channel.purge(limit=3)
+            await tracker_channel.send(embed=embed, file=file)
+        except Exception as e:
+            print(f"Tracker Drop Error: {e}")
 
     #Bot will check every 10 mintes that if any VC created by /vc command is 8 hours old or not.
     @tasks.loop(minutes=10)
