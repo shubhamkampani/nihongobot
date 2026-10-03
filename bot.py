@@ -19,7 +19,7 @@ import urllib.parse
 import ast
 import asyncio
 from kanjis import N5_KANJI, N4_KANJI, N3_KANJI, N2_KANJI, N1_KANJI
-import voice_recv
+from discord.ext import voice_recv
 import speech_recognition as sr
 from difflib import SequenceMatcher
 
