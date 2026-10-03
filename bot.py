@@ -2148,6 +2148,12 @@ def check_accuracy(original, spoken):
     if not spoken: return 0.0
     return SequenceMatcher(None, original, spoken).ratio() * 100
 
+async def delete_thread_later(thread):
+    # 5 Minutes (300 seconds) ka timer
+    await asyncio.sleep(300)
+    try: await thread.delete()
+    except: pass
+
 async def process_shadow_queue(guild, client):
     shadow_processing[guild.id] = True
     
@@ -2158,15 +2164,33 @@ async def process_shadow_queue(guild, client):
         vc_channel = task["vc"]
         topic = task["topic"]
         level_short = task["level_short"]
-        saved_data = task.get("saved_data") 
-        channel = interaction.channel
+        saved_data = task.get("saved_data")
+        original_channel = interaction.channel
         
+        # 🟢 NAYA LOGIC: Create a Private Thread for the User
+        # Agar ye repeat cycle nahi hai, toh naya thread banao
+        if "thread" not in task:
+            try:
+                thread = await original_channel.create_thread(
+                    name=f"🎙️ {user.name}'s Session", 
+                    type=discord.ChannelType.private_thread, 
+                    invitable=False
+                )
+                await thread.add_user(user)
+                task["thread"] = thread
+            except Exception as e:
+                # Agar server me private thread permission nahi hai toh normal channel use karega
+                thread = original_channel
+                task["thread"] = thread
+        else:
+            thread = task["thread"]
+            
         try:
             if not saved_data:
-                await channel.send(f"⏳ **{user.mention}, your Shadow Speaking session is starting in {vc_channel.name}!** Generating {level_short} script...", delete_after=10)
+                await thread.send(f"⏳ **{user.mention}, Sensei is preparing your session in {vc_channel.name}!** Generating {level_short} script...", delete_after=10)
                 
                 prompt = f"""You are a Japanese Sensei. 
-                Task: Generate a natural Japanese monologue (strictly 2 sentence long) about '{topic}'.
+                Task: Generate a natural Japanese monologue (strictly 2 sentences long) about '{topic}'.
                 Constraint: You MUST strictly incorporate grammar points that are specifically introduced at the JLPT {level_short} level (e.g., if N4, use specific N4 grammar patterns only). Keep vocabulary at {level_short} level.
                 Return ONLY a valid JSON with keys: 
                 "sentence" (Japanese text with kanji/kana), 
@@ -2216,13 +2240,13 @@ async def process_shadow_queue(guild, client):
                     repeat_event.set()
 
             turn_view = TurnView()
-            turn_msg = await channel.send(
-                content=f"🎤 **{user.mention}, IT'S YOUR TURN!**\nPlease send a **Voice Note OR Audio File (.mp3, .wav, .m4a)** within 120 seconds repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
+            turn_msg = await thread.send(
+                content=f"🎤 **{user.mention}, IT'S YOUR TURN TO RECORD AND SHARE!**\nPlease send a **Discord Voice Note (bottom left) OR ELSE Audio File after recording in your device's recorder ** here within next 2 minutes repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
                 view=turn_view
             )
             
             def check_voice_msg(m):
-                return m.author.id == user.id and m.channel.id == channel.id and m.attachments
+                return m.author.id == user.id and m.channel.id == thread.id and m.attachments
                 
             msg_task = asyncio.create_task(client.wait_for('message', check=check_voice_msg))
             rep_task = asyncio.create_task(repeat_event.wait())
@@ -2239,44 +2263,47 @@ async def process_shadow_queue(guild, client):
                     "vc": vc_channel,
                     "topic": topic,
                     "level_short": level_short,
-                    "saved_data": data
+                    "saved_data": data,
+                    "thread": thread # Pass the thread so it doesn't create a new one
                 })
                 continue 
                 
             if not msg_task in done:
-                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 120 seconds! Session expired.", view=None)
+                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 2 minutes! Session expired.", view=None)
+                if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
                 shadow_queues[guild.id].pop(0)
                 continue
 
             msg = msg_task.result()
             attachment = msg.attachments[0]
             
-            # 🟢 NAYA LOGIC: Support for Multiple Audio Formats
             filename_lower = attachment.filename.lower()
             valid_extensions = ['.ogg', '.wav', '.mp3', '.m4a']
-            
-            # Agar file ka extension theek hai, ya wo discord mobile ka voice note hai
             is_valid_audio = ('voice-message' in filename_lower) or any(filename_lower.endswith(ext) for ext in valid_extensions)
             
             if not is_valid_audio:
-                await channel.send(f"❌ {user.mention}, please send a valid audio file (.mp3, .wav, .m4a, .ogg) or a Discord Voice Note.")
+                await thread.send(f"❌ {user.mention}, please send a valid audio file (.mp3, .wav, .m4a, .ogg) or a Discord Voice Note.")
+                if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
                 shadow_queues[guild.id].pop(0)
                 continue
-
-            # Auto-Delete User Audio for Privacy
-            try: await msg.delete()
-            except: pass
             
             await turn_msg.edit(view=None)
 
-            # 6. Download and Convert smart dynamic extension
+            # 6. 🟢 BUG FIX: DOWNLOAD FIRST, THEN DELETE!
             ext = os.path.splitext(attachment.filename)[1].lower()
             if not ext: ext = ".ogg"
             
             raw_audio_file = f"user_{user.id}_raw{ext}"
             wav_file = f"user_{user.id}.wav"
             
+            # Pehle successfully save karlo Discord CDN se
             await attachment.save(raw_audio_file)
+            
+            # Usk baad original message delete kardo (Privacy)
+            try: await msg.delete()
+            except: pass
+            
+            # Ab AudioConvert
             audio = AudioSegment.from_file(raw_audio_file)
             audio.export(wav_file, format="wav")
             
@@ -2317,16 +2344,21 @@ async def process_shadow_queue(guild, client):
                     await i.response.send_message(embed=discord.Embed(title="🧠 Grammar Breakdown", description=self.g_data, color=0x2ecc71), ephemeral=True)
             
             view = ShadowSpeakingResultView(user, vocab_list, grammar_text)
-            await channel.send(content=user.mention, embed=embed, view=view)
+            await thread.send(content=f"✅ {user.mention} Here is your result! *(This thread will auto-delete in 5 minutes)*", embed=embed, view=view)
+            
+            # 🟢 Start Background Timer for Thread Deletion
+            if isinstance(thread, discord.Thread):
+                client.loop.create_task(delete_thread_later(thread))
             
         except sr.UnknownValueError:
-            await channel.send(f"❌ {user.mention}, I couldn't hear your voice clearly in the audio file. Try again with less background noise.")
+            await thread.send(f"❌ {user.mention}, I couldn't hear your voice clearly in the audio file. Try again with less background noise.")
+            if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
         except Exception as e:
-            await channel.send(f"❌ An error occurred: {e}")
+            await thread.send(f"❌ An error occurred: {e}")
             if 'voice_client' in locals() and voice_client and voice_client.is_connected():
                 await voice_client.disconnect()
+            if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
         finally:
-            # 🟢 Smart Cleanup: Deletes all variations of generated files to save storage space
             cleanup_files = [f"user_{user.id}.wav", f"sensei_{guild.id}.mp3"]
             for possible_ext in ['.ogg', '.wav', '.mp3', '.m4a']:
                 cleanup_files.append(f"user_{user.id}_raw{possible_ext}")
@@ -2407,7 +2439,7 @@ class PersistentShadowPanelView(View):
             "3. AI Sensei will join your VC and speak a Japanese script based on your JLPT level.\n"
             "4. Come back to this channel! You will have **120 seconds** to record and send a **Voice Note** repeating what Sensei said.\n"
             "5. You can use Native Discord Recording (bottom left) or your Device's voice recording app and share the voice note in this chat.\n"
-            "6. Sensei will analyze your pronunciation and give you an accuracy score!\n\n"
+            "6. Sensei will analyze your pronunciation and give you an accuracy score! Don't worry this score won't affect your `Leaderboard Score`.\n\n"
             "*Pro Tip: Try to mimic the intonation and speed exactly as Sensei says it!*"
         )
         embed = discord.Embed(title="How to Shadow Speak", description=help_text, color=0x3498db)
