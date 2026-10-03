@@ -2149,7 +2149,7 @@ def check_accuracy(original, spoken):
     return SequenceMatcher(None, original, spoken).ratio() * 100
 
 async def delete_thread_later(thread):
-    # 5 Minutes (300 seconds) ka timer
+    # 5 Minutes (300 seconds) timer for auto-delete
     await asyncio.sleep(300)
     try: await thread.delete()
     except: pass
@@ -2164,33 +2164,15 @@ async def process_shadow_queue(guild, client):
         vc_channel = task["vc"]
         topic = task["topic"]
         level_short = task["level_short"]
-        saved_data = task.get("saved_data")
-        original_channel = interaction.channel
+        saved_data = task.get("saved_data") 
+        thread = task["thread"] # Thread ab Modal se hi ban kar aayega
         
-        # 🟢 NAYA LOGIC: Create a Private Thread for the User
-        # Agar ye repeat cycle nahi hai, toh naya thread banao
-        if "thread" not in task:
-            try:
-                thread = await original_channel.create_thread(
-                    name=f"🎙️ {user.name}'s Session", 
-                    type=discord.ChannelType.private_thread, 
-                    invitable=False
-                )
-                await thread.add_user(user)
-                task["thread"] = thread
-            except Exception as e:
-                # Agar server me private thread permission nahi hai toh normal channel use karega
-                thread = original_channel
-                task["thread"] = thread
-        else:
-            thread = task["thread"]
-            
         try:
             if not saved_data:
                 await thread.send(f"⏳ **{user.mention}, Sensei is preparing your session in {vc_channel.name}!** Generating {level_short} script...", delete_after=10)
                 
                 prompt = f"""You are a Japanese Sensei. 
-                Task: Generate a natural Japanese monologue (strictly 2 sentences long) about '{topic}'.
+                Task: Generate a natural Japanese monologue (strictly 2 to 3 sentences long) about '{topic}'.
                 Constraint: You MUST strictly incorporate grammar points that are specifically introduced at the JLPT {level_short} level (e.g., if N4, use specific N4 grammar patterns only). Keep vocabulary at {level_short} level.
                 Return ONLY a valid JSON with keys: 
                 "sentence" (Japanese text with kanji/kana), 
@@ -2241,7 +2223,7 @@ async def process_shadow_queue(guild, client):
 
             turn_view = TurnView()
             turn_msg = await thread.send(
-                content=f"🎤 **{user.mention}, IT'S YOUR TURN TO RECORD AND SHARE!**\nPlease send a **Discord Voice Note (bottom left) OR ELSE Audio File after recording in your device's recorder ** here within next 2 minutes repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
+                content=f"🎤 **{user.mention}, IT'S YOUR TURN TO RECORD AND SHARE!**\nPlease send a ** Discord Voice Note (bottom right) OR Audio File (.mp3, .wav, .m4a) from your device's recorder** here within 120 seconds repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
                 view=turn_view
             )
             
@@ -2264,12 +2246,12 @@ async def process_shadow_queue(guild, client):
                     "topic": topic,
                     "level_short": level_short,
                     "saved_data": data,
-                    "thread": thread # Pass the thread so it doesn't create a new one
+                    "thread": thread 
                 })
                 continue 
                 
             if not msg_task in done:
-                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 2 minutes! Session expired.", view=None)
+                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 120 seconds! Session expired.", view=None)
                 if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
                 shadow_queues[guild.id].pop(0)
                 continue
@@ -2277,6 +2259,13 @@ async def process_shadow_queue(guild, client):
             msg = msg_task.result()
             attachment = msg.attachments[0]
             
+            # 🟢 ANTI-SPAM LOGIC: File size check (Max 2MB)
+            if attachment.size > 2 * 1024 * 1024:
+                await thread.send(f"❌ {user.mention}, file is too large! Please send a short voice note (under 2MB). Are you uploading a song or what?")
+                if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
+                shadow_queues[guild.id].pop(0)
+                continue
+
             filename_lower = attachment.filename.lower()
             valid_extensions = ['.ogg', '.wav', '.mp3', '.m4a']
             is_valid_audio = ('voice-message' in filename_lower) or any(filename_lower.endswith(ext) for ext in valid_extensions)
@@ -2289,21 +2278,18 @@ async def process_shadow_queue(guild, client):
             
             await turn_msg.edit(view=None)
 
-            # 6. 🟢 BUG FIX: DOWNLOAD FIRST, THEN DELETE!
+            # 6. Bug-Free Download & Delete
             ext = os.path.splitext(attachment.filename)[1].lower()
             if not ext: ext = ".ogg"
             
             raw_audio_file = f"user_{user.id}_raw{ext}"
             wav_file = f"user_{user.id}.wav"
             
-            # Pehle successfully save karlo Discord CDN se
             await attachment.save(raw_audio_file)
             
-            # Usk baad original message delete kardo (Privacy)
             try: await msg.delete()
             except: pass
             
-            # Ab AudioConvert
             audio = AudioSegment.from_file(raw_audio_file)
             audio.export(wav_file, format="wav")
             
@@ -2340,18 +2326,17 @@ async def process_shadow_queue(guild, client):
                 async def btn_grammar(self, i: discord.Interaction, btn: discord.ui.Button):
                     if i.user.id != self.user.id: return
                     if not any(r.name == "金 Pro Learners 金" for r in i.user.roles):
-                        return await i.response.send_message("🔒 **Pro Feature:** Upgrade to '金 Pro Learners 金' to view deep grammar breakdowns!", ephemeral=True)
+                        return await i.response.send_message("🔒 **Pro Feature:** Upgrade to '金 Pro Learners 金' to view deep grammar breakdowns! Visit #💎・go-pro to know more.", ephemeral=True)
                     await i.response.send_message(embed=discord.Embed(title="🧠 Grammar Breakdown", description=self.g_data, color=0x2ecc71), ephemeral=True)
             
             view = ShadowSpeakingResultView(user, vocab_list, grammar_text)
             await thread.send(content=f"✅ {user.mention} Here is your result! *(This thread will auto-delete in 5 minutes)*", embed=embed, view=view)
             
-            # 🟢 Start Background Timer for Thread Deletion
             if isinstance(thread, discord.Thread):
                 client.loop.create_task(delete_thread_later(thread))
             
         except sr.UnknownValueError:
-            await thread.send(f"❌ {user.mention}, I couldn't hear your voice clearly in the audio file. Try again with less background noise.")
+            await thread.send(f"❌ {user.mention}, I couldn't hear your voice clearly in the audio file. It might not be clear Japanese speech.")
             if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
         except Exception as e:
             await thread.send(f"❌ An error occurred: {e}")
@@ -2401,23 +2386,34 @@ class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
             if task["interaction"].user.id == interaction.user.id:
                 return await interaction.response.send_message("⚠️ You are already in the queue! Please wait for your turn.", ephemeral=True)
                 
+        # 🟢 NAYA LOGIC: Create Thread Instantly & Send Clickable Link
+        try:
+            thread = await interaction.channel.create_thread(
+                name=f"🎙️ {interaction.user.name}'s Session", 
+                type=discord.ChannelType.private_thread, 
+                invitable=False
+            )
+            await thread.add_user(interaction.user)
+        except Exception:
+            thread = interaction.channel
+            
         shadow_queues[guild_id].append({
             "interaction": interaction,
             "vc": vc_channel,
             "topic": topic,
-            "level_short": level_short
+            "level_short": level_short,
+            "thread": thread # Thread pass ho raha hai
         })
         
         queue_position = len(shadow_queues[guild_id])
         
         if queue_position == 1 and not shadow_processing.get(guild_id, False):
-            await interaction.response.send_message(f"✅ Preparing your session about '{topic}'...", ephemeral=True)
+            msg = f"✅ **Session Started!**\n👉 **Click here to join your private room:** {thread.mention}\n\n*Listen to Sensei in {vc_channel.mention} and send your audio recording in that thread.*"
+            await interaction.response.send_message(msg, ephemeral=True)
             asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
         else:
-            queue_text = "".join([f"{idx + 1}. {task['interaction'].user.mention}\n" for idx, task in enumerate(shadow_queues[guild_id])])
-            embed = discord.Embed(title="🎙️ Speaking Queue", description=f"⏳ **Shadow Speaking Queue:**\n{queue_text}", color=0x3498db)
-            await interaction.response.send_message(f"✅ Added to queue. Position: {queue_position}", embed=embed)
-            
+            msg = f"⏳ **Added to Queue (Position: {queue_position})**\n👉 **Your private room:** {thread.mention}\n\n*Please wait in the thread for your turn.*"
+            await interaction.response.send_message(msg, ephemeral=True)
             if not shadow_processing.get(guild_id, False):
                 asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
 
@@ -2436,11 +2432,12 @@ class PersistentShadowPanelView(View):
             "**🎙 Shadow Speaking Guide:**\n\n"
             "1. **Join any Voice Channel** in the server.\n"
             "2. Click **▶️ Start Shadow Speaking** and type a topic you want to talk about.\n"
-            "3. AI Sensei will join your VC and speak a Japanese script based on your JLPT level.\n"
-            "4. Come back to this channel! You will have **120 seconds** to record and send a **Voice Note** repeating what Sensei said.\n"
-            "5. You can use Native Discord Recording (bottom left) or your Device's voice recording app and share the voice note in this chat.\n"
-            "6. Sensei will analyze your pronunciation and give you an accuracy score! Don't worry this score won't affect your `Leaderboard Score`.\n\n"
-            "*Pro Tip: Try to mimic the intonation and speed exactly as Sensei says it!*"
+            "3. The bot will create a **Private Thread** just for you. Click the link provided to join it.\n"
+            "4. AI Sensei will join your VC and speak a Japanese script.\n"
+            "5. Send a **Voice Note/Audio File** in your Private Thread repeating what Sensei said.\n"
+            "6. You can use Discord Native Audio (bottom right🎙, if available) or your Device's Audio Recorder and share the file in your private session.\n"
+            "7. Get your pronunciation score and grammar breakdown! Don't worry, it won't affect your `Leaderboard Score`.\n\n"
+            "*Note: Your private thread and audio will auto-delete after 5 minutes for privacy.*"
         )
         embed = discord.Embed(title="How to Shadow Speak", description=help_text, color=0x3498db)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2455,11 +2452,11 @@ async def setup_shadow(interaction: discord.Interaction):
         
     embed = discord.Embed(
         title="🎙️ A.I. SHADOW SPEAKING PANEL", 
-        description="Master your Japanese pronunciation and fluency!\n\nClick the **▶️ Start Shadowing** button below to spawn AI Sensei in your voice channel. Sensei will speak a script based on your topic, and you will repeat it using a Voice Note in this chat to get your accuracy score.", 
+        description="Master your Japanese pronunciation and fluency!\n\nClick the **▶️ Start Shadow Speaking** button below to spawn AI Sensei in your voice channel. You will be assigned a private room to record and check your speaking accuracy.", 
         color=0x9b59b6
     )
     
     await interaction.channel.send(embed=embed, view=PersistentShadowPanelView())
     await interaction.followup.send("✅ Panel deployed successfully!", ephemeral=True)
+    
 bot.run(os.environ.get("BOT_TOKEN"))
-
