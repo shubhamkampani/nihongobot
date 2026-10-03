@@ -211,14 +211,14 @@ async def generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, fo
     prompt = f"""You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice Kanji Reading questions for JLPT {level_short}.
     CRITICAL RULES:
     1. You MUST use ONLY words formed from these specific Kanjis: {kanji_str}.
-    2. The 'question' MUST be visually large using markdown. Format it exactly like this: "What is the correct reading for this word?\\n# **[Insert Kanji Word Here]**". Do not add any furigana in the question.
+    2. The 'question' MUST be visually large using markdown. Format it exactly like this: "What is the correct reading for this word?\\n# [Insert Kanji Word Here]". Do NOT use bold markdown (**) around the Kanji. Do not add any furigana in the question.
     3. The 4 options (A, B, C, D) MUST be strictly in 100% Hiragana. Do not use Romaji or English.
     4. Provide a very brief English 'explanation' of the meaning of the Kanji word.
     5. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Output ONLY a valid JSON array of objects.
 
     Output format:
     [{{
-        "question": "What is the correct reading for this word?\\n# **毎日**",
+        "question": "What is the correct reading for this word?\\n# 毎日",
         "options": {{"A": "まいにち", "B": "まいんち", "C": "まにち", "D": "まんち"}},
         "answer": "A",
         "explanation": "毎日 (まいにち) means 'every day'."
