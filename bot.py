@@ -1947,22 +1947,6 @@ async def setup_tickets(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=PersistentTicketPanelView())
     await interaction.followup.send("✅ Ticket panel deployed successfully!", ephemeral=True)
 
-@bot.tree.command(name="dropdokkai", description="[Admin] Manually trigger Missed Dokkai Drop.")
-async def manual_dokkai(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    
-    # 🟢 Sirf Admins/Founders chala payenge
-    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
-    if not has_permission:
-        return await interaction.followup.send("❌ Access Denied. Only Admins can trigger this.", ephemeral=True)
-        
-    await interaction.followup.send("⏳ Dropping today's Dokkai manually across all channels...", ephemeral=True)
-    
-    # Calling the exact same background function we use for the daily drop
-    await bot.drop_freemium_dokkai_task()
-    
-    await interaction.followup.send("✅ Dokkai Drop successfully completed!", ephemeral=True)
-
 #Announce command for admin announcement in server
 @bot.tree.command(name="announce", description="[Admin Only] Send an official announcement in the current channel.")
 @app_commands.describe(message="The announcement message you want to broadcast.")
