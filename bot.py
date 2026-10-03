@@ -1241,6 +1241,7 @@ class NihongoBot(commands.Bot):
         self.add_view(PersistentFreemiumStoryView()) 
         self.add_view(PersistentDailyKanjiView())    
         self.add_view(PersistentTicketPanelView())
+        self.add_view(PersistentShadowPanelView())
         self.add_view(PersistentTicketCloseView())
         view = View(timeout=None)
         view.add_item(JLPTSelect())
@@ -2271,52 +2272,99 @@ async def process_shadow_queue(guild, client):
                 
     shadow_processing[guild.id] = False
 
-@bot.tree.command(name="shadowspeaking", description="Practice speaking Japanese with AI Sensei in Voice Channel.")
-@app_commands.describe(topic="What topic you want to talk about? (e.g., Ordering coffee at a cafe)")
-async def shadow_speaking(interaction: discord.Interaction, topic: str):
-    user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
-    if not user_level_role:
-        return await interaction.response.send_message("❌ Please select a JLPT Learner role (N5-N1) first.", ephemeral=True)
+# --- 🎙️ SHADOW SPEAKING UI PANEL ---
+class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
+    topic_input = discord.ui.TextInput(
+        label='What should Sensei talk about?',
+        style=discord.TextStyle.short,
+        placeholder='e.g., At a cafe, introducing myself, Anime...',
+        max_length=100
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        topic = self.topic_input.value
         
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        return await interaction.response.send_message("❌ Please join a Voice Channel first then re-use this command!", ephemeral=True)
-        
-    level_short = user_level_role.split(" ")[1]
-    vc_channel = interaction.user.voice.channel
-    guild_id = interaction.guild.id
-    
-    # Initialize queue for the server if not exists
-    if guild_id not in shadow_queues:
-        shadow_queues[guild_id] = []
-        
-    # Prevent spamming the queue
-    for task in shadow_queues[guild_id]:
-        if task["interaction"].user.id == interaction.user.id:
-            return await interaction.response.send_message("⚠️ You are already in the Shadow Speaking queue! Please wait for your turn.", ephemeral=True)
+        # 1. Validation
+        user_level_role = next((r.name for r in interaction.user.roles if r.name in ROLE_NAMES), None)
+        if not user_level_role:
+            return await interaction.response.send_message("❌ Please select a JLPT Learner role (N5-N1) first.", ephemeral=True)
             
-    # Add to Queue
-    shadow_queues[guild_id].append({
-        "interaction": interaction,
-        "vc": vc_channel,
-        "topic": topic,
-        "level_short": level_short
-    })
-    
-    queue_position = len(shadow_queues[guild_id])
-    
-    if queue_position == 1 and not shadow_processing.get(guild_id, False):
-        await interaction.response.send_message(f"✅ Preparing your session about '{topic}'...", ephemeral=True)
-        asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
-    else:
-        # Show queue position
-        queue_text = f"⏳ **Shadow Speaking Queue:**\n"
-        for idx, task in enumerate(shadow_queues[guild_id]):
-            queue_text += f"{idx + 1}. {task['interaction'].user.mention}\n"
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return await interaction.response.send_message("❌ Please join a Voice Channel first! Sensei will speak there.", ephemeral=True)
             
-        embed = discord.Embed(title="🎙️ Speaking Queue", description=queue_text, color=0x3498db)
-        await interaction.response.send_message(f"✅ Added to queue. Position: {queue_position}", embed=embed)
+        level_short = user_level_role.split(" ")[1]
+        vc_channel = interaction.user.voice.channel
+        guild_id = interaction.guild.id
         
-        if not shadow_processing.get(guild_id, False):
+        # 2. Queue System
+        if guild_id not in shadow_queues:
+            shadow_queues[guild_id] = []
+            
+        for task in shadow_queues[guild_id]:
+            if task["interaction"].user.id == interaction.user.id:
+                return await interaction.response.send_message("⚠️ You are already in the queue! Please wait for your turn.", ephemeral=True)
+                
+        shadow_queues[guild_id].append({
+            "interaction": interaction,
+            "vc": vc_channel,
+            "topic": topic,
+            "level_short": level_short
+        })
+        
+        queue_position = len(shadow_queues[guild_id])
+        
+        if queue_position == 1 and not shadow_processing.get(guild_id, False):
+            await interaction.response.send_message(f"✅ Preparing your session about '{topic}'...", ephemeral=True)
             asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
+        else:
+            queue_text = f"⏳ **Shadow Speaking Queue:**\n"
+            for idx, task in enumerate(shadow_queues[guild_id]):
+                queue_text += f"{idx + 1}. {task['interaction'].user.mention}\n"
+                
+            embed = discord.Embed(title="🎙️ Speaking Queue", description=queue_text, color=0x3498db)
+            await interaction.response.send_message(f"✅ Added to queue. Position: {queue_position}", embed=embed)
+            
+            if not shadow_processing.get(guild_id, False):
+                asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
+
+
+class PersistentShadowPanelView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        
+    @discord.ui.button(label="▶️ Start Shadowing", style=discord.ButtonStyle.success, custom_id="shadow_start")
+    async def btn_start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ShadowTopicModal())
+        
+    @discord.ui.button(label="❓ How it Works", style=discord.ButtonStyle.secondary, custom_id="shadow_help")
+    async def btn_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        help_text = (
+            "**🎙️ Shadow Speaking Guide:**\n\n"
+            "1. **Join any Voice Channel** in the server.\n"
+            "2. Click **▶️ Start Shadowing** and type a topic you want to talk about.\n"
+            "3. AI Sensei will join your VC and speak a Japanese sentence based on your JLPT level.\n"
+            "4. Come back to this channel! You will have **30 seconds** to record and send a **Voice Note/Voice Message** repeating what Sensei said.\n"
+            "5. Sensei will analyze your pronunciation and give you an accuracy score!\n\n"
+            "*Pro Tip: Try to mimic the intonation and speed exactly as Sensei says it!*"
+        )
+        embed = discord.Embed(title="How to Shadow Speak", description=help_text, color=0x3498db)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="setupshadow", description="[Admin Only] Drop the Shadow Speaking UI panel in the current channel.")
+async def setup_shadow(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied.", ephemeral=True)
+        
+    embed = discord.Embed(
+        title="🎙️ A.I. SHADOW SPEAKING PANEL", 
+        description="Master your Japanese pronunciation and fluency!\n\nClick the **▶️ Start Shadowing** button below to spawn AI Sensei in your voice channel. Sensei will speak a sentence based on your topic, and you will repeat it using a Voice Note in this chat to get your accuracy score.", 
+        color=0x9b59b6
+    )
+    
+    await interaction.channel.send(embed=embed, view=PersistentShadowPanelView())
+    await interaction.followup.send("✅ Panel deployed successfully!", ephemeral=True)
 
 bot.run(os.environ.get("BOT_TOKEN"))
