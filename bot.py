@@ -2148,9 +2148,9 @@ def check_accuracy(original, spoken):
     if not spoken: return 0.0
     return SequenceMatcher(None, original, spoken).ratio() * 100
 
-async def delete_thread_later(thread):
-    # 5 Minutes (300 seconds) timer for auto-delete
-    await asyncio.sleep(300)
+async def delete_thread_later(thread, delay=1200):
+    # 20 Minutes (1200 seconds) timer for auto-delete
+    await asyncio.sleep(delay)
     try: await thread.delete()
     except: pass
 
@@ -2164,194 +2164,206 @@ async def process_shadow_queue(guild, client):
         vc_channel = task["vc"]
         topic = task["topic"]
         level_short = task["level_short"]
-        saved_data = task.get("saved_data") 
-        thread = task["thread"] # Thread ab Modal se hi ban kar aayega
+        thread = task["thread"] 
         
         try:
-            if not saved_data:
-                await thread.send(f"⏳ **{user.mention}, Sensei is preparing your session in {vc_channel.name}!** Generating {level_short} script...", delete_after=10)
+            await thread.send(f"⏳ **{user.mention}, Sensei is preparing your session in {vc_channel.name}!** Generating {level_short} script...", delete_after=10)
+            
+            # 1. Fetch AI Data (4-Line Conversation Request)
+            prompt = f"""You are a Japanese Sensei. 
+            Task: Generate a natural 4-line conversational paragraph about '{topic}'.
+            Constraint: You MUST strictly use grammar points and vocabulary specifically introduced at the JLPT {level_short} level.
+            Return ONLY a valid JSON with keys: 
+            "conversation": an array of EXACTLY 4 objects. Each object must have keys: "sentence" (kanji/kana), "romaji" (romaji reading), "english" (english meaning).
+            "vocab": array of objects with "word", "reading", "meaning" for the vocabulary used in the whole conversation.
+            "grammar": brief explanation of the specific {level_short} grammar structures used in the paragraph."""
+            
+            raw_text = await generate_gemini_response(prompt)
+            data = extract_json(raw_text)
+            if isinstance(data, list): data = data[0]
+            
+            conversation = data.get("conversation", [])
+            # Fallback if AI messes up the array
+            if not conversation:
+                conversation = [{"sentence": data.get("sentence", "エラー"), "romaji": data.get("romaji", "era-"), "english": data.get("english", "Error")}]
                 
-                prompt = f"""You are a Japanese Sensei. 
-                Task: Generate a natural Japanese monologue (strictly 2 to 3 sentences long) about '{topic}'.
-                Constraint: You MUST strictly incorporate grammar points that are specifically introduced at the JLPT {level_short} level (e.g., if N4, use specific N4 grammar patterns only). Keep vocabulary at {level_short} level.
-                Return ONLY a valid JSON with keys: 
-                "sentence" (Japanese text with kanji/kana), 
-                "romaji" (romaji reading), 
-                "english" (english meaning), 
-                "vocab" (array of objects with "word", "reading", "meaning"), 
-                "grammar" (explain the specific {level_short} grammar structures used in the sentence)."""
-                
-                raw_text = await generate_gemini_response(prompt)
-                data = extract_json(raw_text)
-                if isinstance(data, list): data = data[0]
-            else:
-                data = saved_data
-                
-            ai_sentence = data.get("sentence", "")
-            romaji = data.get("romaji", "")
-            english = data.get("english", "")
             vocab_list = data.get("vocab", [])
             grammar_text = data.get("grammar", "")
             
-            # 2. Connect to VC
+            # 2. Connect to VC (Stays connected for the whole loop)
             voice_client = await vc_channel.connect()
             
-            # 3. Bot Speaks
-            tts_text = f"{ai_sentence}. さあ、あなたの番です。"
-            tts = gTTS(text=tts_text, lang='ja')
-            tts_filename = f"sensei_{guild.id}.mp3"
-            tts.save(tts_filename)
+            i = 0
+            max_rounds = min(4, len(conversation))
+            accumulated_ja, accumulated_ro, accumulated_en = "", "", ""
+            timeout_occurred = False
             
-            voice_client.play(discord.FFmpegPCMAudio(tts_filename))
-            while voice_client.is_playing():
-                await asyncio.sleep(1)
+            # 3. 🟢 THE PROGRESSIVE SHADOWING LOOP (4 ROUNDS)
+            while i < max_rounds:
+                current_line = conversation[i]
                 
-            await voice_client.disconnect()
-            
-            # 4. Wait logic with PRIORITY REPEAT
-            repeat_event = asyncio.Event()
-
-            class TurnView(View):
-                def __init__(self):
-                    super().__init__(timeout=120.0)
-                @discord.ui.button(label="🔁 Repeat Sensei's Audio", style=discord.ButtonStyle.secondary)
-                async def btn_repeat(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
-                    if btn_interaction.user.id != user.id:
-                        return await btn_interaction.response.send_message("❌ This is not your session!", ephemeral=True)
-                    await btn_interaction.response.defer()
-                    repeat_event.set()
-
-            turn_view = TurnView()
-            turn_msg = await thread.send(
-                content=f"🎤 **{user.mention}, IT'S YOUR TURN TO RECORD AND SHARE!**\nPlease send a ** Discord Voice Note (bottom right) OR Audio File (.mp3, .wav, .m4a) from your device's recorder** here within 120 seconds repeating the sentence:\n\n> **{ai_sentence}**\n> *{romaji}*", 
-                view=turn_view
-            )
-            
-            def check_voice_msg(m):
-                return m.author.id == user.id and m.channel.id == thread.id and m.attachments
+                # Accumulate gracefully
+                if accumulated_ja:
+                    current_ja = accumulated_ja + "。 " + current_line.get("sentence", "").replace("。", "")
+                    current_ro = accumulated_ro + ". " + current_line.get("romaji", "").replace(".", "")
+                    current_en = accumulated_en + ". " + current_line.get("english", "").replace(".", "")
+                else:
+                    current_ja = current_line.get("sentence", "").replace("。", "")
+                    current_ro = current_line.get("romaji", "").replace(".", "")
+                    current_en = current_line.get("english", "").replace(".", "")
+                    
+                if not current_ja.endswith("。"): current_ja += "。"
+                    
+                # Bot Speaks
+                tts_text = f"{current_ja} さあ、あなたの番です。"
+                tts = gTTS(text=tts_text, lang='ja')
+                tts_filename = f"sensei_{guild.id}_round{i}.mp3"
+                tts.save(tts_filename)
                 
-            msg_task = asyncio.create_task(client.wait_for('message', check=check_voice_msg))
-            rep_task = asyncio.create_task(repeat_event.wait())
-            
-            done, pending = await asyncio.wait([msg_task, rep_task], timeout=120.0, return_when=asyncio.FIRST_COMPLETED)
-            
-            for p in pending: p.cancel()
-            
-            if rep_task in done:
-                await turn_msg.edit(content=f"🔁 {user.mention} requested a repeat. Rejoining VC...", view=None)
-                shadow_queues[guild.id].pop(0)
-                shadow_queues[guild.id].insert(0, { 
-                    "interaction": interaction,
-                    "vc": vc_channel,
-                    "topic": topic,
-                    "level_short": level_short,
-                    "saved_data": data,
-                    "thread": thread 
-                })
-                continue 
+                voice_client.play(discord.FFmpegPCMAudio(tts_filename))
+                while voice_client.is_playing():
+                    await asyncio.sleep(1)
+                    
+                repeat_event = asyncio.Event()
+
+                class TurnView(View):
+                    def __init__(self):
+                        super().__init__(timeout=180.0)
+                    @discord.ui.button(label="🔁 Repeat Sensei", style=discord.ButtonStyle.secondary)
+                    async def btn_repeat(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+                        if btn_interaction.user.id != user.id:
+                            return await btn_interaction.response.send_message("❌ This is not your session!", ephemeral=True)
+                        await btn_interaction.response.defer()
+                        repeat_event.set()
+
+                turn_view = TurnView()
+                turn_msg = await thread.send(
+                    content=f"🎤 **ROUND {i+1}/{max_rounds} - IT'S YOUR TURN!**\nSend a **Voice Note / Audio File** here within 3 minutes repeating:\n\n> **{current_ja}**\n> *{current_ro}*", 
+                    view=turn_view
+                )
                 
-            if not msg_task in done:
-                await turn_msg.edit(content=f"⏳ {user.mention}, you took more than 120 seconds! Session expired.", view=None)
-                if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
-                shadow_queues[guild.id].pop(0)
-                continue
-
-            msg = msg_task.result()
-            attachment = msg.attachments[0]
-            
-            # 🟢 ANTI-SPAM LOGIC: File size check (Max 2MB)
-            if attachment.size > 2 * 1024 * 1024:
-                await thread.send(f"❌ {user.mention}, file is too large! Please send a short voice note (under 2MB). Are you uploading a song or what?")
-                if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
-                shadow_queues[guild.id].pop(0)
-                continue
-
-            filename_lower = attachment.filename.lower()
-            valid_extensions = ['.ogg', '.wav', '.mp3', '.m4a']
-            is_valid_audio = ('voice-message' in filename_lower) or any(filename_lower.endswith(ext) for ext in valid_extensions)
-            
-            if not is_valid_audio:
-                await thread.send(f"❌ {user.mention}, please send a valid audio file (.mp3, .wav, .m4a, .ogg) or a Discord Voice Note.")
-                if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
-                shadow_queues[guild.id].pop(0)
-                continue
-            
-            await turn_msg.edit(view=None)
-
-            # 6. Bug-Free Download & Delete
-            ext = os.path.splitext(attachment.filename)[1].lower()
-            if not ext: ext = ".ogg"
-            
-            raw_audio_file = f"user_{user.id}_raw{ext}"
-            wav_file = f"user_{user.id}.wav"
-            
-            await attachment.save(raw_audio_file)
-            
-            try: await msg.delete()
-            except: pass
-            
-            audio = AudioSegment.from_file(raw_audio_file)
-            audio.export(wav_file, format="wav")
-            
-            # 7. STT & Evaluate
-            recognizer = sr.Recognizer()
-            spoken_text = ""
-            with sr.AudioFile(wav_file) as source:
-                audio_data = recognizer.record(source)
-                spoken_text = recognizer.recognize_google(audio_data, language="ja-JP")
+                def check_voice_msg(m):
+                    return m.author.id == user.id and m.channel.id == thread.id and m.attachments
+                    
+                msg_task = asyncio.create_task(client.wait_for('message', check=check_voice_msg))
+                rep_task = asyncio.create_task(repeat_event.wait())
                 
-            accuracy = check_accuracy(ai_sentence, spoken_text)
-            
-            # 8. Dashboard Display
-            color = 0x2ecc71 if accuracy >= 75 else (0xf1c40f if accuracy >= 50 else 0xe74c3c)
-            embed = discord.Embed(title="🎙 Shadow Speaking Result", color=color)
-            embed.add_field(name="Target Sentence", value=f"**{ai_sentence}**\n*{english}*", inline=False)
-            embed.add_field(name="What We Heard", value=spoken_text, inline=False)
-            embed.add_field(name="Pronunciation Accuracy", value=f"**{accuracy:.1f}%**", inline=False)
-            
-            class ShadowSpeakingResultView(View):
-                def __init__(self, u, v_data, g_data):
-                    super().__init__(timeout=None)
-                    self.user = u
-                    self.v_data = v_data
-                    self.g_data = g_data
+                done, pending = await asyncio.wait([msg_task, rep_task], timeout=180.0, return_when=asyncio.FIRST_COMPLETED)
+                for p in pending: p.cancel()
+                
+                if rep_task in done:
+                    await turn_msg.edit(content=f"🔁 {user.mention} requested a repeat. Replaying...", view=None)
+                    if os.path.exists(tts_filename): os.remove(tts_filename)
+                    continue # Replay same round (doesn't increment i)
+                    
+                if not msg_task in done:
+                    # INACTIVITY TIMEOUT
+                    await turn_msg.edit(content=f"⏳ {user.mention}, 3 minutes inactivity! Session ended to save queue time.", view=None)
+                    timeout_occurred = True
+                    break 
 
-                @discord.ui.button(label="📖 Vocabulary Used", style=discord.ButtonStyle.primary)
-                async def btn_vocab(self, i: discord.Interaction, btn: discord.ui.Button):
-                    if i.user.id != self.user.id: return
-                    v_txt = "".join([f"**{v.get('word', '')}** ({v.get('reading', '')}) - {v.get('meaning', '')}\n" for v in self.v_data])
-                    await i.response.send_message(embed=discord.Embed(title="📖 Vocabulary List", description=v_txt, color=0x3498db), ephemeral=True)
+                msg = msg_task.result()
+                attachment = msg.attachments[0]
+                
+                if attachment.size > 2 * 1024 * 1024:
+                    await thread.send(f"❌ File too large. Max 2MB. Replaying round...")
+                    if os.path.exists(tts_filename): os.remove(tts_filename)
+                    continue
 
-                @discord.ui.button(label="🧠 Grammar Breakdown (Pro)", style=discord.ButtonStyle.success)
-                async def btn_grammar(self, i: discord.Interaction, btn: discord.ui.Button):
-                    if i.user.id != self.user.id: return
-                    if not any(r.name == "金 Pro Learners 金" for r in i.user.roles):
-                        return await i.response.send_message("🔒 **Pro Feature:** Upgrade to '金 Pro Learners 金' to view deep grammar breakdowns! Visit #💎・go-pro to know more.", ephemeral=True)
-                    await i.response.send_message(embed=discord.Embed(title="🧠 Grammar Breakdown", description=self.g_data, color=0x2ecc71), ephemeral=True)
-            
-            view = ShadowSpeakingResultView(user, vocab_list, grammar_text)
-            await thread.send(content=f"✅ {user.mention} Here is your result! *(This thread will auto-delete in 5 minutes)*", embed=embed, view=view)
-            
+                filename_lower = attachment.filename.lower()
+                valid_extensions = ['.ogg', '.wav', '.mp3', '.m4a']
+                is_valid_audio = ('voice-message' in filename_lower) or any(filename_lower.endswith(ext) for ext in valid_extensions)
+                
+                if not is_valid_audio:
+                    await thread.send(f"❌ Invalid audio file format. Replaying round...")
+                    if os.path.exists(tts_filename): os.remove(tts_filename)
+                    continue
+                
+                await turn_msg.edit(view=None)
+
+                # Process Audio (No Discord Message Deletion - User Keeps Voice Notes!)
+                ext = os.path.splitext(attachment.filename)[1].lower()
+                if not ext: ext = ".ogg"
+                
+                raw_audio_file = f"user_{user.id}_raw{ext}"
+                wav_file = f"user_{user.id}.wav"
+                
+                await attachment.save(raw_audio_file)
+                audio = AudioSegment.from_file(raw_audio_file)
+                audio.export(wav_file, format="wav")
+                
+                # STT & Evaluate
+                recognizer = sr.Recognizer()
+                spoken_text = ""
+                try:
+                    with sr.AudioFile(wav_file) as source:
+                        audio_data = recognizer.record(source)
+                        spoken_text = recognizer.recognize_google(audio_data, language="ja-JP")
+                except sr.UnknownValueError:
+                    await thread.send("❌ Couldn't hear clear Japanese. Replaying this round...")
+                    for f in [raw_audio_file, wav_file, tts_filename]:
+                        if os.path.exists(f): os.remove(f)
+                    continue
+                    
+                accuracy = check_accuracy(current_ja, spoken_text)
+                color = 0x2ecc71 if accuracy >= 75 else (0xf1c40f if accuracy >= 50 else 0xe74c3c)
+                
+                round_embed = discord.Embed(title=f"Round {i+1} Result", color=color)
+                round_embed.add_field(name="What We Heard", value=spoken_text, inline=False)
+                round_embed.add_field(name="Accuracy", value=f"**{accuracy:.1f}%**", inline=False)
+                await thread.send(embed=round_embed)
+                
+                # Prepare for next loop & Local Cleanup
+                accumulated_ja = current_ja
+                accumulated_ro = current_ro
+                accumulated_en = current_en
+                
+                for f in [raw_audio_file, wav_file, tts_filename]:
+                    if os.path.exists(f): os.remove(f)
+                    
+                i += 1 # Move to next round
+                
+            # 4. End of Loop & Final Summary
+            if voice_client and voice_client.is_connected():
+                await voice_client.disconnect()
+                
+            if not timeout_occurred and i == max_rounds:
+                final_embed = discord.Embed(title="🏆 Shadow Speaking Complete!", description="Awesome job completing all 4 rounds!", color=0x3498db)
+                final_embed.add_field(name="Full Conversation", value=f"**{accumulated_ja}**\n\n*{accumulated_en}*", inline=False)
+                
+                class FinalView(View):
+                    def __init__(self, u, v_data, g_data):
+                        super().__init__(timeout=None)
+                        self.user = u
+                        self.v_data = v_data
+                        self.g_data = g_data
+
+                    @discord.ui.button(label="📖 Vocabulary Used", style=discord.ButtonStyle.primary)
+                    async def btn_vocab(self, i: discord.Interaction, btn: discord.ui.Button):
+                        if i.user.id != self.user.id: return
+                        v_txt = "".join([f"**{v.get('word', '')}** ({v.get('reading', '')}) - {v.get('meaning', '')}\n" for v in self.v_data])
+                        await i.response.send_message(embed=discord.Embed(title="📖 Vocabulary List", description=v_txt, color=0x3498db), ephemeral=True)
+
+                    @discord.ui.button(label="🧠 Grammar Breakdown (Pro)", style=discord.ButtonStyle.success)
+                    async def btn_grammar(self, i: discord.Interaction, btn: discord.ui.Button):
+                        if i.user.id != self.user.id: return
+                        if not any(r.name == "金 Pro Learners 金" for r in i.user.roles):
+                            return await i.response.send_message("🔒 **Pro Feature:** Upgrade to view deep grammar breakdowns!", ephemeral=True)
+                        await i.response.send_message(embed=discord.Embed(title="🧠 Grammar Breakdown", description=self.g_data, color=0x2ecc71), ephemeral=True)
+                
+                view = FinalView(user, vocab_list, grammar_text)
+                await thread.send(content=f"✅ {user.mention} Session Finished! *(This thread will auto-delete in 20 minutes)*", embed=final_embed, view=view)
+                
             if isinstance(thread, discord.Thread):
-                client.loop.create_task(delete_thread_later(thread))
-            
-        except sr.UnknownValueError:
-            await thread.send(f"❌ {user.mention}, I couldn't hear your voice clearly in the audio file. It might not be clear Japanese speech.")
-            if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
+                client.loop.create_task(delete_thread_later(thread, 1200)) # 20 Min Timer starts AFTER session ends
+                
         except Exception as e:
             await thread.send(f"❌ An error occurred: {e}")
             if 'voice_client' in locals() and voice_client and voice_client.is_connected():
                 await voice_client.disconnect()
-            if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread))
+            if isinstance(thread, discord.Thread): client.loop.create_task(delete_thread_later(thread, 1200))
         finally:
-            cleanup_files = [f"user_{user.id}.wav", f"sensei_{guild.id}.mp3"]
-            for possible_ext in ['.ogg', '.wav', '.mp3', '.m4a']:
-                cleanup_files.append(f"user_{user.id}_raw{possible_ext}")
-                
-            for f in cleanup_files:
-                if os.path.exists(f): os.remove(f)
-            
-            if shadow_queues.get(guild.id) and not (rep_task in done if 'rep_task' in locals() and 'done' in locals() else False):
+            if shadow_queues.get(guild.id):
                 shadow_queues[guild.id].pop(0)
                 
     shadow_processing[guild.id] = False
@@ -2386,7 +2398,6 @@ class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
             if task["interaction"].user.id == interaction.user.id:
                 return await interaction.response.send_message("⚠️ You are already in the queue! Please wait for your turn.", ephemeral=True)
                 
-        # 🟢 NAYA LOGIC: Create Thread Instantly & Send Clickable Link
         try:
             thread = await interaction.channel.create_thread(
                 name=f"🎙️ {interaction.user.name}'s Session", 
@@ -2402,21 +2413,22 @@ class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
             "vc": vc_channel,
             "topic": topic,
             "level_short": level_short,
-            "thread": thread # Thread pass ho raha hai
+            "thread": thread 
         })
         
         queue_position = len(shadow_queues[guild_id])
         
         if queue_position == 1 and not shadow_processing.get(guild_id, False):
-            msg = f"✅ **Session Started!**\n👉 **Click here to join your private room:** {thread.mention}\n\n*Listen to Sensei in {vc_channel.mention} and send your audio recording in that thread.*"
+            msg = f"✅ **Session Started!**\n👉 **Click here to join your private room:** {thread.mention}\n\n*Listen to Sensei in {vc_channel.mention} and send your audio in the {thread.mention} only.*"
             await interaction.response.send_message(msg, ephemeral=True)
             asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
         else:
-            msg = f"⏳ **Added to Queue (Position: {queue_position})**\n👉 **Your private room:** {thread.mention}\n\n*Please wait in the thread for your turn.*"
+            # 🟢 DYNAMIC QUEUE TIMER ADDED
+            estimated_wait = (queue_position - 1) * 10
+            msg = f"⏳ **Added to Queue (Position: {queue_position})**\n⏱️ **Estimated Wait Time:** ~{estimated_wait} minutes.\n👉 **Your private room:** {thread.mention}\n\n*Please wait in the thread for your turn.*"
             await interaction.response.send_message(msg, ephemeral=True)
             if not shadow_processing.get(guild_id, False):
                 asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
-
 
 class PersistentShadowPanelView(View):
     def __init__(self):
@@ -2430,18 +2442,16 @@ class PersistentShadowPanelView(View):
     async def btn_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         help_text = (
             "**🎙 Shadow Speaking Guide:**\n\n"
-            "1. **Join any Voice Channel** in the server.\n"
-            "2. Click **▶️ Start Shadow Speaking** and type a topic you want to talk about.\n"
-            "3. The bot will create a **Private Thread** just for you. Click the link provided to join it.\n"
-            "4. AI Sensei will join your VC and speak a Japanese script.\n"
-            "5. Send a **Voice Note/Audio File** in your Private Thread repeating what Sensei said.\n"
-            "6. You can use Discord Native Audio (bottom right🎙, if available) or your Device's Audio Recorder and share the file in your private session.\n"
-            "7. Get your pronunciation score and grammar breakdown! Don't worry, it won't affect your `Leaderboard Score`.\n\n"
-            "*Note: Your private thread and audio will auto-delete after 5 minutes for privacy.*"
+            "1. **Join any Voice Channel**.\n"
+            "2. Click **▶️ Start Shadow Speaking** and type a topic.\n"
+            "3. The bot will create a **Private Thread** just for you.\n"
+            "4. AI Sensei will join your VC and start a **4-Round Conversation**.\n"
+            "5. Send a Voice Note repeating what Sensei said. Each round, the conversation gets longer!\n"
+            "6. Get your pronunciation score, vocab list, and grammar breakdown at the end.\n\n"
+            "*Note: The private thread will auto-delete 20 minutes after completion.*"
         )
         embed = discord.Embed(title="How to Shadow Speak", description=help_text, color=0x3498db)
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 @bot.tree.command(name="setupshadow", description="[Admin Only] Drop the Shadow Speaking UI panel in the current channel.")
 async def setup_shadow(interaction: discord.Interaction):
@@ -2452,7 +2462,7 @@ async def setup_shadow(interaction: discord.Interaction):
         
     embed = discord.Embed(
         title="🎙️ A.I. SHADOW SPEAKING PANEL", 
-        description="Master your Japanese pronunciation and fluency!\n\nClick the **▶️ Start Shadow Speaking** button below to spawn AI Sensei in your voice channel. You will be assigned a private room to record and check your speaking accuracy.", 
+        description="Master your Japanese pronunciation and fluency!\n\nClick the **▶️ Start Shadow Speaking** button below to spawn AI Sensei in your voice channel. You will be assigned a private room to record and check your speaking accuracy progressively.", 
         color=0x9b59b6
     )
     
