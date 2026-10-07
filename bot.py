@@ -524,7 +524,9 @@ async def process_listening_queue(guild, client):
                 await voice_client.move_to(vc)
             else:
                 voice_client = await vc.connect()
-                
+
+            level_short = level_full.split(" ")[1]
+
             # 🟢 ANTI-REPEAT RANDOMIZER SEED
             random_topics = [
                 "buying a ticket or asking for train directions at a station", "discussing weekend plans or a holiday trip with a friend", "a teacher giving detailed instructions for a homework assignment", "ordering specific items and customizing a meal at a restaurant", "asking a local for directions to a hospital or post office", "a daily weather forecast or news announcement on the radio", "calling a clinic to suddenly reschedule a doctor's appointment", "a store clerk explaining a return policy or a product feature", "coworkers discussing a project deadline or changing a meeting schedule",
