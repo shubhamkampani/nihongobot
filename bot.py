@@ -591,11 +591,11 @@ async def process_listening_queue(guild, client):
             chosen_topic = random.choice(random_topics)
             random_seed = random.randint(1000, 9999999)
             
-            # 🟢 FIX 1: Strict Japanese Options Rule
-            prompt = f"""You are an expert JLPT Examiner. Generate exactly {q_count} BRAND NEW, distinct Japanese listening scenarios for JLPT {level_short}.
+            # 🟢 FIX 1: Options must be ONLY in Japanese, No English translation for options
+            prompt = f"""You are an expert JLPT Examiner. Generate exactly {q_count} BRAND NEW, distinct Japanese listening scenarios for JLPT {level_short}. Use vocabulary which should be appropriate for {level_short}, don't overburden with unnecessary vocabulary which is not required for this level.
             CRITICAL RULE 1: Never repeat scenarios. Use random seed [{random_seed}]. Theme: {chosen_topic}.
             CRITICAL RULE 2 (MULTI-VOICE FORMAT): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks questions.
-            CRITICAL RULE 3 (JAPANESE OPTIONS ONLY): The 4 options (A, B, C, D) MUST be strictly in Japanese (Kanji/Kana). NEVER translate the options to English.
+            CRITICAL RULE 3 (JAPANESE OPTIONS ONLY): The 4 options (A, B, C, D) MUST be strictly in Japanese (Kanji/Kana). NEVER translate the options to English. Only the "question" field should be translated to English.
             CRITICAL RULE 4 (NO REPETITION): Do NOT repeat words unnaturally to mimic human stuttering (e.g., avoid writing "ふたり、ふたりは"). The Japanese must flow perfectly clean.
             
             Output ONLY a valid JSON ARRAY of exactly {q_count} objects:
@@ -639,7 +639,7 @@ async def process_listening_queue(guild, client):
                 
                 combined_audio = chime_sound
                 
-                # 🟢 3 Distinct Neural Voices for Narrator, Male, Female
+                # 🟢 Dynamic Pitch Modulation for Narrator vs Female Character
                 for j, line in enumerate(scenario):
                     voice_type = line.get("voice", "narrator").lower()
                     text = line.get("text", "")
@@ -647,14 +647,18 @@ async def process_listening_queue(guild, client):
                     
                     if voice_type == "male":
                         voice_model = "ja-JP-KeitaNeural"
+                        pitch = "+0Hz" # Standard Male
                     elif voice_type == "female":
                         voice_model = "ja-JP-NanamiNeural"
+                        pitch = "+15Hz" # Higher pitch, sounds younger/lively
                     else:
-                        voice_model = "ja-JP-AoiNeural" # Formal voice for Narrator
+                        voice_model = "ja-JP-NanamiNeural"
+                        pitch = "-10Hz" # Deeper pitch, sounds mature/formal like a JLPT Narrator
                         
                     temp_file = f"temp_{guild.id}_{i}_{j}.mp3"
                     try:
-                        communicate = edge_tts.Communicate(text, voice_model)
+                        # Applying the Pitch Modulator here
+                        communicate = edge_tts.Communicate(text, voice_model, pitch=pitch)
                         await communicate.save(temp_file)
                         segment = AudioSegment.from_file(temp_file, format="mp3")
                         combined_audio += segment
@@ -730,7 +734,6 @@ async def process_listening_queue(guild, client):
             listening_queues[guild.id].pop(0)
             
     queue_processing[guild.id] = False
-
 
 class QuizSelectionView(View):
     def __init__(self, user, level_full):
