@@ -388,9 +388,10 @@ class QuizView(View):
             if self.is_fallback:
                 return await interaction.response.edit_message(content="⚠️ An AI generation error occurred. Your score was not saved. Please try `/quiz` again.", embed=None, view=None)
                 
+            # 🟢 FIX to Prevent DuplicateKeyError when user changes JLPT level
             quiz_db.update_one(
-                {"_id": self.user.id, "level": self.level}, 
-                {"$inc": {"score": self.score, "time_taken": time_taken}}, 
+                {"_id": self.user.id}, 
+                {"$set": {"level": self.level}, "$inc": {"score": self.score, "time_taken": time_taken}}, 
                 upsert=True
             )
             
@@ -504,6 +505,26 @@ class GrammarTopicModal(discord.ui.Modal, title='Grammar Practice'):
 listening_queues = {} 
 queue_processing = {} 
 
+class ListeningSingleQView(View):
+    def __init__(self, user, correct_ans):
+        super().__init__(timeout=30.0)
+        self.user = user
+        self.correct_ans = correct_ans
+        self.result = False
+        self.user_choice = None
+        
+        for label in ["A", "B", "C", "D"]:
+            btn = Button(label=label, custom_id=label, style=discord.ButtonStyle.primary)
+            btn.callback = self.button_callback
+            self.add_item(btn)
+            
+    async def button_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user.id: return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
+        self.user_choice = interaction.data['custom_id']
+        self.result = (self.user_choice == self.correct_ans)
+        await interaction.response.edit_message(content="✅ Answer locked! Wait for the next audio...", view=None, embed=None)
+        self.stop()
+
 async def process_listening_queue(guild, client):
     queue_processing[guild.id] = True
     while listening_queues.get(guild.id, []):
@@ -520,78 +541,146 @@ async def process_listening_queue(guild, client):
             await channel.send(f"🎧 {user.mention}, starting your **{mode_name}** session in **{vc.name}** now...", delete_after=15)
             
             voice_client = discord.utils.get(client.voice_clients, guild=guild)
-            if voice_client and voice_client.is_connected():
-                await voice_client.move_to(vc)
-            else:
-                voice_client = await vc.connect()
-
+            if voice_client and voice_client.is_connected(): await voice_client.move_to(vc)
+            else: voice_client = await vc.connect()
+                
             level_short = level_full.split(" ")[1]
-
-            # 🟢 ANTI-REPEAT RANDOMIZER SEED
+            
             random_topics = [
-                "buying a ticket or asking for train directions at a station", "discussing weekend plans or a holiday trip with a friend", "a teacher giving detailed instructions for a homework assignment", "ordering specific items and customizing a meal at a restaurant", "asking a local for directions to a hospital or post office", "a daily weather forecast or news announcement on the radio", "calling a clinic to suddenly reschedule a doctor's appointment", "a store clerk explaining a return policy or a product feature", "coworkers discussing a project deadline or changing a meeting schedule",
-                "planning an itinerary for a trip to a famous Japanese city", "reporting a lost umbrella or wallet at a police box (koban)", "a senior student explaining university club rules to a freshman", "asking a landlord about complex Japanese garbage disposal rules", "discussing room features and rent at a real estate agency", "negotiating part-time job shifts with a strict manager",
-                "choosing a suitable birthday present for a mutual friend", "an announcement at a station about sudden train delays or track changes", "making or altering a hotel/ryokan reservation over the phone", "discussing a recently watched movie, book, or shared hobby", "asking a senior colleague for advice on a work problem", "explaining how to operate a washing machine or air conditioner", "apologizing for being late to a meeting and explaining the reason",
-                "discussing health, diet plans, or exercise habits with a friend", "planning the location and budget for a company drinking party (nomikai)", "a parent and child talking about upcoming school events", "a customer returning a defective clothing item at a retail store", "discussing the preparation steps for an upcoming cultural festival", "getting a haircut and giving specific styling instructions at a salon", "checking in at a hospital reception and describing symptoms","buying ingredients for a specific recipe at a supermarket"
+                "buying a ticket or asking for train directions at a station", "discussing weekend plans with a friend",
+                "a teacher giving detailed instructions for homework", "ordering specific items at a restaurant",
+                "asking a local for directions", "a daily weather forecast or news announcement",
+                "calling a clinic to reschedule an appointment", "a store clerk explaining a return policy",
+                "coworkers discussing a project deadline", "reporting a lost umbrella at a police box (koban)",
+                "a senior student explaining university club rules", "asking a landlord about garbage disposal rules",
+                "discussing room features at a real estate agency", "negotiating part-time job shifts",
+                "choosing a suitable birthday present", "an announcement at a station about train delays",
+                "making or altering a hotel reservation", "discussing a recently watched movie or hobby",
+                "asking a senior colleague for advice", "explaining how to operate a washing machine",
+                "apologizing for being late to a meeting", "discussing health, diet, or exercise habits",
+                "planning the location for a company drinking party (nomikai)", "a parent and child talking about school events",
+                "a customer returning a defective clothing item", "getting a haircut at a salon",
+                "checking in at a hospital reception", "buying ingredients for a recipe at a supermarket"
             ]
             chosen_topic = random.choice(random_topics)
-            random_seed = random.randint(1000, 99999)
+            random_seed = random.randint(1000, 9999999)
             
-            prompt = f"""You are an expert JLPT Examiner creating content like 'Nihongo Nook'. 
-            Generate a BRAND NEW, completely unique Japanese listening script for JLPT {level_short}.
-            CRITICAL ANTI-CHEAT RULE: Never repeat old scenarios. Use this random seed [{random_seed}] to ensure maximum uniqueness. Today's unique theme is: {chosen_topic}.
+            # 🟢 THE ULTIMATE MULTI-VOICE PROMPT
+            prompt = f"""You are an expert JLPT Examiner creating content like 'Nihongo Nook'. Generate exactly {q_count} BRAND NEW, completely distinct Japanese listening scenarios for JLPT {level_short}.
+            CRITICAL RULE 1: Never repeat old scenarios. Use random seed [{random_seed}]. Today's theme inspiration: "{chosen_topic}".
+            CRITICAL RULE 2 (MULTI-VOICE FORMAT): The audio engine supports distinct Male and Female voices. You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator must introduce the situation and ask the questions.
             
-            Follow the STRICT JLPT 'Mondai' Format:
-            1. [Intro] Narrator explains the situation (e.g. "男の人と女の人が話しています"). Don't just use the example, feel free to randomise name, if needed, in place of 男の人 and 女の人, and use those names correctly throughout the conversation.
-            2. [Pre-Question] Narrator asks the main question.
-            3. [Dialogue] The actual conversation happens (long enough to cover {q_count} questions).
-            4. [Post-Question] Narrator repeats the question.
+            Follow the STRICT JLPT 'Mondai' Format for EACH scenario:
+            1. Narrator explains the situation.
+            2. Narrator asks the main question.
+            3. Male and Female characters converse naturally.
+            4. Narrator repeats the question.
             
-            Generate {q_count} multiple-choice questions based on this single cohesive script.
-            Provide furigana in square brackets exactly after EVERY Kanji used in the options (e.g., 毎日[まいにち]).
-            
-            Output ONLY a valid JSON object matching this exact structure:
-            {{
-                "script": "The full Japanese script including Narrator intro, dialogue, and outro...",
-                "questions": [
-                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A", "explanation": "Why this is correct."}}
-                ]
-            }}"""
+            Provide furigana in square brackets exactly after EVERY Kanji used in the options.
+            Output ONLY a valid JSON ARRAY of exactly {q_count} objects, matching this EXACT structure:
+            [
+                {{
+                    "scenario": [
+                        {{"voice": "narrator", "text": "男の人と女の人が話しています。"}},
+                        {{"voice": "narrator", "text": "男の人は何を買いますか。"}},
+                        {{"voice": "male", "text": "すみません、これをください。"}},
+                        {{"voice": "female", "text": "はい、かしこまりました。"}},
+                        {{"voice": "narrator", "text": "男の人は何を買いますか。"}}
+                    ],
+                    "question": "The English translation of the main question",
+                    "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
+                    "answer": "A",
+                    "explanation": "Why this is correct."
+                }}
+            ]"""
             
             raw_text = await generate_gemini_response(prompt)
-            data = extract_json(raw_text)
-            if isinstance(data, list): data = data[0]
+            questions_data = extract_json(raw_text)
+            if isinstance(questions_data, dict): questions_data = [questions_data]
             
-            script = data.get("script", "")
-            questions_data = data.get("questions", [])
+            ffmpeg_options = '-af "lowpass=f=2500,aecho=0.8:0.7:60:0.4,volume=1.2"' if env == "exam" else ""
             
-            is_slow = True if level_short in ["N5", "N4"] else False
+            total_score = 0
+            start_time = time.time()
+            user_choices = []
             
-            from gtts import gTTS
-            tts = gTTS(text=script, lang='ja', slow=is_slow)
-            tts.save(f"listening_{guild.id}.mp3")
+            import edge_tts
+            from pydub import AudioSegment
             
-            # 🟢 REAL EXAM HALL FFMPEG AUDIO FILTERS (The Magic!)
-            ffmpeg_options = ""
-            if env == "exam":
-                # lowpass=f=2500 cuts off high pitches to sound muffled/fat
-                # aecho adds that large empty classroom echo effect
-                # volume amplifies the messiness slightly
-                ffmpeg_options = '-af "lowpass=f=2500,aecho=0.8:0.7:60:0.4,volume=1.2"'
-            
-            voice_client.play(discord.FFmpegPCMAudio(f"listening_{guild.id}.mp3", executable="ffmpeg", options=ffmpeg_options))
-            
-            while voice_client.is_playing():
-                await asyncio.sleep(1)
+            for i, q_data in enumerate(questions_data):
+                scenario = q_data.get("scenario", [])
                 
+                # Fallback just in case AI messes up the format
+                if not scenario:
+                    script_text = q_data.get("script", "エラーが発生しました。")
+                    scenario = [{"voice": "narrator", "text": script_text}]
+                    
+                # 🟢 Ting-dong added naturally as the narrator's first line!
+                scenario.insert(0, {"voice": "narrator", "text": "ピーンポーン。"})
+                
+                combined_audio = AudioSegment.empty()
+                
+                # 🟢 MULTI-VOICE STITCHING ENGINE
+                for j, line in enumerate(scenario):
+                    voice_type = line.get("voice", "female").lower()
+                    text = line.get("text", "")
+                    if not text: continue
+                    
+                    # Assigning correct neural voices (Keita for male, Nanami for female/narrator)
+                    voice_model = "ja-JP-KeitaNeural" if voice_type == "male" else "ja-JP-NanamiNeural"
+                    
+                    temp_file = f"temp_{guild.id}_{i}_{j}.mp3"
+                    try:
+                        communicate = edge_tts.Communicate(text, voice_model)
+                        await communicate.save(temp_file)
+                        segment = AudioSegment.from_file(temp_file, format="mp3")
+                        combined_audio += segment
+                    except Exception as e:
+                        print(f"TTS Segment Error: {e}")
+                    finally:
+                        if os.path.exists(temp_file): os.remove(temp_file)
+                
+                audio_file = f"listening_{guild.id}_{i}.mp3"
+                combined_audio.export(audio_file, format="mp3")
+                
+                # Play the seamlessly stitched multi-voice audio
+                voice_client.play(discord.FFmpegPCMAudio(audio_file, executable="ffmpeg", options=ffmpeg_options))
+                while voice_client.is_playing():
+                    await asyncio.sleep(1)
+                
+                embed = discord.Embed(title=f"🎧 {level_full} Question ({i+1}/{q_count})", description=f"**{q_data.get('question', 'Question?')}**\n\n🇦 {q_data.get('options', {}).get('A', 'A')}\n🇧 {q_data.get('options', {}).get('B', 'B')}\n🇨 {q_data.get('options', {}).get('C', 'C')}\n🇩 {q_data.get('options', {}).get('D', 'D')}", color=0x9b59b6)
+                embed.set_footer(text="⏳ You have 30 seconds to answer.")
+                
+                view = ListeningSingleQView(user, q_data.get('answer', 'A'))
+                msg = await channel.send(content=f"🎤 **{user.mention}, what is the correct answer?**", embed=embed, view=view)
+                
+                await view.wait() 
+                
+                if view.user_choice:
+                    user_choices.append(view.user_choice)
+                    if view.result: total_score += 1
+                else:
+                    user_choices.append("Timeout")
+                    await msg.edit(content="⏳ **Time's up for this question!**", view=None, embed=None)
+                    
+                if os.path.exists(audio_file): os.remove(audio_file)
+            
             await voice_client.disconnect()
+            time_taken = round(time.time() - start_time)
             
-            q = questions_data[0]
-            embed = discord.Embed(title=f"🎧 {level_full} Listening Quiz (1/{len(questions_data)})", description=f"**{q['question']}**\n\n🇦 {q['options']['A']}\n🇧 {q['options']['B']}\n🇨 {q['options']['C']}\n🇩 {q['options']['D']}", color=0x9b59b6)
+            quiz_db.update_one({"_id": user.id}, {"$set": {"level": level_full}, "$inc": {"score": total_score, "time_taken": time_taken}}, upsert=True)
             
-            view = QuizView(user, questions_data, level_full, time.time())
-            msg = await channel.send(content=f"{user.mention}, here is your listening quiz!", embed=embed, view=view)
-            view.message = msg
+            exp_embed = discord.Embed(title=f"🏁 Listening Complete! (Score: {total_score}/{q_count})", color=discord.Color.green())
+            for i, q in enumerate(questions_data):
+                user_ans = user_choices[i]
+                correct_ans = q.get('answer', 'A')
+                mark = "✅ Correct" if user_ans == correct_ans else f"❌ Incorrect (Answer was {correct_ans})"
+                exp_embed.add_field(
+                    name=f"Q{i+1}: You chose {user_ans} | {mark}", 
+                    value=f"*{q.get('explanation', 'No explanation provided.')}*", 
+                    inline=False
+                )
+            await channel.send(content=f"{user.mention} Here is your detailed review!", embed=exp_embed)
             
         except Exception as e:
             await channel.send(f"❌ Listening Error for {user.mention}: {e}")
@@ -602,7 +691,6 @@ async def process_listening_queue(guild, client):
             listening_queues[guild.id].pop(0)
             
     queue_processing[guild.id] = False
-
 
 class QuizSelectionView(View):
     def __init__(self, user, level_full):
