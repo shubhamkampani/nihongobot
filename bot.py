@@ -512,9 +512,12 @@ async def process_listening_queue(guild, client):
         vc = task["vc"]
         level_full = task["level"]
         channel = task["channel"]
+        q_count = task["length"]
+        env = task["env"]
         
         try:
-            await channel.send(f"🎧 {user.mention}, it's your turn! Joining **{vc.name}** now...", delete_after=15)
+            mode_name = "Real Exam Hall" if env == "exam" else "Studio Clear"
+            await channel.send(f"🎧 {user.mention}, starting your **{mode_name}** session in **{vc.name}** now...", delete_after=15)
             
             voice_client = discord.utils.get(client.voice_clients, guild=guild)
             if voice_client and voice_client.is_connected():
@@ -522,25 +525,34 @@ async def process_listening_queue(guild, client):
             else:
                 voice_client = await vc.connect()
                 
-            level_short = level_full.split(" ")[1]
-            has_pro = any(r.name == "金 Pro Learners 金" for r in user.roles)
-            q_count = 5 if has_pro else 3 
+            # 🟢 ANTI-REPEAT RANDOMIZER SEED
+            random_topics = [
+                "buying a ticket or asking for train directions at a station", "discussing weekend plans or a holiday trip with a friend", "a teacher giving detailed instructions for a homework assignment", "ordering specific items and customizing a meal at a restaurant", "asking a local for directions to a hospital or post office", "a daily weather forecast or news announcement on the radio", "calling a clinic to suddenly reschedule a doctor's appointment", "a store clerk explaining a return policy or a product feature", "coworkers discussing a project deadline or changing a meeting schedule",
+                "planning an itinerary for a trip to a famous Japanese city", "reporting a lost umbrella or wallet at a police box (koban)", "a senior student explaining university club rules to a freshman", "asking a landlord about complex Japanese garbage disposal rules", "discussing room features and rent at a real estate agency", "negotiating part-time job shifts with a strict manager",
+                "choosing a suitable birthday present for a mutual friend", "an announcement at a station about sudden train delays or track changes", "making or altering a hotel/ryokan reservation over the phone", "discussing a recently watched movie, book, or shared hobby", "asking a senior colleague for advice on a work problem", "explaining how to operate a washing machine or air conditioner", "apologizing for being late to a meeting and explaining the reason",
+                "discussing health, diet plans, or exercise habits with a friend", "planning the location and budget for a company drinking party (nomikai)", "a parent and child talking about upcoming school events", "a customer returning a defective clothing item at a retail store", "discussing the preparation steps for an upcoming cultural festival", "getting a haircut and giving specific styling instructions at a salon", "checking in at a hospital reception and describing symptoms","buying ingredients for a specific recipe at a supermarket"
+            ]
+            chosen_topic = random.choice(random_topics)
+            random_seed = random.randint(1000, 99999)
             
-            prompt = f"""You are an expert JLPT Examiner. Generate a short Japanese listening script for JLPT {level_short} level.
-            Then generate {q_count} multiple-choice questions based ONLY on that script.
+            prompt = f"""You are an expert JLPT Examiner creating content like 'Nihongo Nook'. 
+            Generate a BRAND NEW, completely unique Japanese listening script for JLPT {level_short}.
+            CRITICAL ANTI-CHEAT RULE: Never repeat old scenarios. Use this random seed [{random_seed}] to ensure maximum uniqueness. Today's unique theme is: {chosen_topic}.
             
-            CRITICAL RULES:
-            1. NARRATOR INTRO: The script MUST start with a narrator providing context (e.g., "男の人と女の人が話しています。" or "田中さんと佐藤さんが話しています。"). This context will help understand the listener that converstaion is between which 2 people. 
-            2. CLEAR ROLES: Use clear names or roles in the script and the questions so the listener knows exactly who is speaking. Also use the similar names or roles given throughout conversation, just before narrator's respective dialouge.
-            3. NATURAL: The script should be natural conversational Japanese (max 350 chars). As the script will be used for practising for JLPT listening exam so it should be relevant for {level_short} level and the story/script should be randomized always meaning no same script should be repeated more than once.
-            4. FURIGANA MANDATORY: In ALL multiple-choice questions and options, you MUST provide furigana in square brackets exactly after EVERY Kanji used (e.g., 毎日[まいにち]).
-            5. JSON FORMAT: Use strictly double quotes (") for all keys. Do not add trailing commas.
+            Follow the STRICT JLPT 'Mondai' Format:
+            1. [Intro] Narrator explains the situation (e.g. "男の人と女の人が話しています"). Don't just use the example, feel free to randomise name, if needed, in place of 男の人 and 女の人, and use those names correctly throughout the conversation.
+            2. [Pre-Question] Narrator asks the main question.
+            3. [Dialogue] The actual conversation happens (long enough to cover {q_count} questions).
+            4. [Post-Question] Narrator repeats the question.
+            
+            Generate {q_count} multiple-choice questions based on this single cohesive script.
+            Provide furigana in square brackets exactly after EVERY Kanji used in the options (e.g., 毎日[まいにち]).
             
             Output ONLY a valid JSON object matching this exact structure:
             {{
-                "script": "Narrator intro... followed by dialogue...",
+                "script": "The full Japanese script including Narrator intro, dialogue, and outro...",
                 "questions": [
-                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A", "explanation": "Brief English explanation of why this answer is correct and others are wrong based on the story."}}
+                    {{"question": "...", "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}}, "answer": "A", "explanation": "Why this is correct."}}
                 ]
             }}"""
             
@@ -551,17 +563,21 @@ async def process_listening_queue(guild, client):
             script = data.get("script", "")
             questions_data = data.get("questions", [])
             
-            if not script or not questions_data:
-                raise ValueError("AI failed to generate script or questions.")
-                
-            # Speed Control Logic (Slow for N5/N4)
             is_slow = True if level_short in ["N5", "N4"] else False
             
             from gtts import gTTS
             tts = gTTS(text=script, lang='ja', slow=is_slow)
             tts.save(f"listening_{guild.id}.mp3")
             
-            voice_client.play(discord.FFmpegPCMAudio(f"listening_{guild.id}.mp3", executable="ffmpeg"))
+            # 🟢 REAL EXAM HALL FFMPEG AUDIO FILTERS (The Magic!)
+            ffmpeg_options = ""
+            if env == "exam":
+                # lowpass=f=2500 cuts off high pitches to sound muffled/fat
+                # aecho adds that large empty classroom echo effect
+                # volume amplifies the messiness slightly
+                ffmpeg_options = '-af "lowpass=f=2500,aecho=0.8:0.7:60:0.4,volume=1.2"'
+            
+            voice_client.play(discord.FFmpegPCMAudio(f"listening_{guild.id}.mp3", executable="ffmpeg", options=ffmpeg_options))
             
             while voice_client.is_playing():
                 await asyncio.sleep(1)
@@ -580,11 +596,11 @@ async def process_listening_queue(guild, client):
             if 'voice_client' in locals() and voice_client and voice_client.is_connected():
                 await voice_client.disconnect()
                 
-        # Remove completed task from queue
         if listening_queues.get(guild.id):
             listening_queues[guild.id].pop(0)
             
     queue_processing[guild.id] = False
+
 
 class QuizSelectionView(View):
     def __init__(self, user, level_full):
@@ -621,44 +637,70 @@ class QuizSelectionView(View):
         if not interaction.user.voice or not interaction.user.voice.channel:
             return await interaction.response.send_message("❌ **You need to join a Voice Channel first to start Listening Practice!**", ephemeral=True)
             
-        vc = interaction.user.voice.channel
-        guild_id = interaction.guild.id
-        
-        if guild_id not in listening_queues:
-            listening_queues[guild_id] = []
-            
-        # Prevent same user from spamming queue
-        for task in listening_queues[guild_id]:
-            if task["user"].id == interaction.user.id:
-                return await interaction.response.send_message("⚠️ You are already in the listening queue! Please wait for your turn.", ephemeral=True)
+        # 🟢 Open Settings Menu before Queueing
+        class ListeningOptionsView(View):
+            def __init__(self, u, lvl):
+                super().__init__(timeout=60)
+                self.user = u
+                self.level_full = lvl
+                self.length = 1
+                self.env = "clear"
+
+            @discord.ui.select(placeholder="Select Length...", options=[
+                discord.SelectOption(label="Quick Practice (1 Question)", value="1", emoji="⏱️"),
+                discord.SelectOption(label="Exam Mode (5 Questions)", value="5", emoji="🎓")
+            ], custom_id="len_sel")
+            async def len_callback(self, i, select):
+                if i.user.id != self.user.id: return
+                self.length = int(select.values[0])
+                await i.response.defer()
+
+            @discord.ui.select(placeholder="Select Environment...", options=[
+                discord.SelectOption(label="Studio Clear (Perfect Audio)", value="clear", emoji="🎧"),
+                discord.SelectOption(label="Real Exam Hall (Echo & Muffled)", value="exam", emoji="🏫")
+            ], custom_id="env_sel")
+            async def env_callback(self, i, select):
+                if i.user.id != self.user.id: return
+                self.env = select.values[0]
+                await i.response.defer()
+
+            @discord.ui.button(label="🚀 Start Listening", style=discord.ButtonStyle.success, row=2)
+            async def start_btn(self, i, btn):
+                if i.user.id != self.user.id: return
                 
-        # Add to the global queue
-        listening_queues[guild_id].append({
-            "user": interaction.user,
-            "vc": vc,
-            "level": self.level_full,
-            "channel": interaction.channel
-        })
-        
-        queue_position = len(listening_queues[guild_id])
-        
-        if queue_position == 1 and not queue_processing.get(guild_id, False):
-            # Immediate start
-            await interaction.response.edit_message(content=f"⏳ Joining **{vc.name}** and preparing your listening practice... Please wait.", embed=None, view=None)
-            asyncio.create_task(process_listening_queue(interaction.guild, interaction.client))
-        else:
-            # Show queue embed if someone else is already listening
-            queue_text = f"⏳ **Listening Queue for {interaction.guild.name}:**\n"
-            for idx, task in enumerate(listening_queues[guild_id]):
-                queue_text += f"{idx + 1}. {task['user'].mention} in queue\n"
+                # Check Pro limit for 5 Questions
+                if self.length == 5 and not any(r.name == "金 Pro Learners 金" for r in i.user.roles):
+                    return await i.response.send_message("❌ **Exam Mode (5 Qs)** is exclusively for **金 Pro Learners 金**. Free users can only do Quick Practice (1 Q).", ephemeral=True)
                 
-            queue_text += f"\n{interaction.user.mention}, let me concentrate on the current users. I'll come to you when it's your turn!"
+                vc = i.user.voice.channel
+                guild_id = i.guild.id
+                
+                if guild_id not in listening_queues: listening_queues[guild_id] = []
+                for task in listening_queues[guild_id]:
+                    if task["user"].id == i.user.id:
+                        return await i.response.send_message("⚠️ You are already in the queue!", ephemeral=True)
+                        
+                listening_queues[guild_id].append({
+                    "user": i.user,
+                    "vc": vc,
+                    "level": self.level_full,
+                    "channel": i.channel,
+                    "length": self.length,
+                    "env": self.env
+                })
+                
+                qp = len(listening_queues[guild_id])
+                if qp == 1 and not queue_processing.get(guild_id, False):
+                    await i.response.edit_message(content=f"⏳ Joining **{vc.name}** and preparing your {self.env} listening practice...", embed=None, view=None)
+                    asyncio.create_task(process_listening_queue(i.guild, i.client))
+                else:
+                    await i.response.edit_message(content=f"⏳ Added to Queue (Position: {qp}). Please wait.", embed=None, view=None)
+                    if not queue_processing.get(guild_id, False):
+                        asyncio.create_task(process_listening_queue(i.guild, i.client))
+
+        embed = discord.Embed(title="🎧 Listening Setup", description="Customize your practice session before starting:", color=0x3498db)
+        await interaction.response.send_message(embed=embed, view=ListeningOptionsView(self.user, self.level_full), ephemeral=True)
             
-            embed = discord.Embed(title="🎧 Listening Queue", description=queue_text, color=0x3498db)
-            await interaction.response.edit_message(content="", embed=embed, view=None)
-            
-            if not queue_processing.get(guild_id, False):
-                asyncio.create_task(process_listening_queue(interaction.guild, interaction.client))
 
     @discord.ui.button(label="Kanji Reading Quiz", style=discord.ButtonStyle.danger, emoji="🈴")
     async def btn_kanji(self, interaction: discord.Interaction, button: discord.ui.Button):
