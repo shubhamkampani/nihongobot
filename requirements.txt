@@ -5,6 +5,7 @@ Pillow
 pytz
 aiohttp
 gTTS
+edge-tts
 discord-ext-voice-recv
 SpeechRecognition
 pydub
