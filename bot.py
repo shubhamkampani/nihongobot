@@ -1385,6 +1385,60 @@ class NihongoBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix='!', intents=intents, help_command=None)
 
+    # 🟢 Global Interaction Logger (Background Task) in #user-interation-logs channel
+    async def on_interaction(self, interaction: discord.Interaction):
+        # 1. 
+        await super().on_interaction(interaction)
+        
+        # 2. Background logging (Error-proof)
+        try:
+            if not interaction.guild: return
+            
+            log_channel = discord.utils.get(interaction.guild.channels, name="user-interaction-logs")
+            if not log_channel: return
+                
+            feature_name = None
+            
+            # Agar Slash Command ya Context Menu use kiya (e.g., /quiz, /read)
+            if interaction.type == discord.InteractionType.application_command:
+                feature_name = f"/{interaction.command.name}"
+                
+            # Agar kisi Persistent Panel ka Button use kiya
+            elif interaction.type == discord.InteractionType.component:
+                cid = interaction.data.get('custom_id', '')
+                
+                # STRICT RULE: Ignore Onboarding & Setup roles completely (No spam)
+                if cid in ["role_visitor", "role_learner", "role_native", "jlpt_dropdown"]:
+                    return
+                    
+                # Mapping system buttons to readable names
+                friendly_names = {
+                    "premium_journal_btn": "Daily Journal (Pro)",
+                    "shadow_start": "Shadow Speaking",
+                    "shadow_help": "Shadow Speaking Guide",
+                    "panel_support": "Support Ticket",
+                    "panel_incident": "Incident Report",
+                    "panel_gopro": "Go Pro Enquiry",
+                    "freemium_trans": "Story Translate (Free)",
+                    "freemium_gram": "Story Grammar (Pro)",
+                    "freemium_voc": "Story Vocab (Pro)",
+                    "kanji_visual": "Kanji Visual Trick",
+                    "kanji_pronounce": "Kanji Audio Trick",
+                    "kanji_story": "Kanji Memory Story",
+                    "ticket_close_btn": "Close Ticket"
+                }
+                
+                if cid in friendly_names:
+                    feature_name = friendly_names[cid]
+            
+            # Agar valid feature mila, toh log channel mein bhej do
+            if feature_name:
+                log_msg = f"{interaction.user.mention} used `{feature_name}` in {interaction.channel.mention}"
+                self.loop.create_task(log_channel.send(log_msg))
+                
+        except Exception as e:
+            print(f"Logging error silently ignored: {e}")
+
     async def setup_hook(self):
             #... existing tasks ...
         self.weekly_leaderboard_loop.start()
