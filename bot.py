@@ -543,18 +543,15 @@ async def process_listening_queue(guild, client):
             mode_name = "Real Exam Hall" if env == "exam" else "Studio Clear"
             await interaction.edit_original_response(content=f"⏳ Preparing your **{mode_name}** session...", embed=None, view=None)
             
-            # 🟢 1. DYNAMIC PRIVATE VC CREATION
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 user: discord.PermissionOverwrite(view_channel=True, connect=True),
                 guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True, manage_channels=True)
             }
             
-            # Make it visible (but unjoinable) to peers of the same JLPT level
             peer_role = discord.utils.get(guild.roles, name=level_full)
             if peer_role: overwrites[peer_role] = discord.PermissionOverwrite(view_channel=True, connect=False)
                 
-            # Full access for Admins
             jr_admin = discord.utils.get(guild.roles, name="Junior Admin（ジュニア・アデュミン）")
             sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
             if jr_admin: overwrites[jr_admin] = discord.PermissionOverwrite(view_channel=True, connect=True)
@@ -566,11 +563,9 @@ async def process_listening_queue(guild, client):
                 overwrites=overwrites
             )
             
-            # Drag user to new VC
             if user.voice and user.voice.channel:
                 await user.move_to(new_vc)
             
-            # Connect bot to new VC
             voice_client = discord.utils.get(client.voice_clients, guild=guild)
             if voice_client and voice_client.is_connected(): await voice_client.move_to(new_vc)
             else: voice_client = await new_vc.connect()
@@ -596,11 +591,12 @@ async def process_listening_queue(guild, client):
             chosen_topic = random.choice(random_topics)
             random_seed = random.randint(1000, 9999999)
             
-            # 🟢 2. UPDATED PROMPT (Strict Anti-Stutter Rule)
-            prompt = f"""You are an expert JLPT Examiner creating content like 'Nihongo Nook'. Generate exactly {q_count} BRAND NEW, distinct Japanese listening scenarios for JLPT {level_short}.
+            # 🟢 FIX 1: Strict Japanese Options Rule
+            prompt = f"""You are an expert JLPT Examiner. Generate exactly {q_count} BRAND NEW, distinct Japanese listening scenarios for JLPT {level_short}.
             CRITICAL RULE 1: Never repeat scenarios. Use random seed [{random_seed}]. Theme: {chosen_topic}.
-            CRITICAL RULE 2 (MULTI-VOICE FORMAT): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks questions. Male and Female will hold the conversation.
-            CRITICAL RULE 3 (NO REPETITION): Do NOT repeat words unnaturally to mimic human stuttering (e.g., avoid writing "ふたり、ふたりは" or "使った、使った"). The Japanese must flow perfectly and grammatically clean.
+            CRITICAL RULE 2 (MULTI-VOICE FORMAT): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks questions.
+            CRITICAL RULE 3 (JAPANESE OPTIONS ONLY): The 4 options (A, B, C, D) MUST be strictly in Japanese (Kanji/Kana). NEVER translate the options to English.
+            CRITICAL RULE 4 (NO REPETITION): Do NOT repeat words unnaturally to mimic human stuttering (e.g., avoid writing "ふたり、ふたりは"). The Japanese must flow perfectly clean.
             
             Output ONLY a valid JSON ARRAY of exactly {q_count} objects:
             [
@@ -631,26 +627,31 @@ async def process_listening_queue(guild, client):
             import edge_tts
             from pydub import AudioSegment
             
-            # 🟢 3. LOAD REAL CHIME SOUND
             try:
                 chime_sound = AudioSegment.from_file("chime.mp3")
             except:
-                chime_sound = AudioSegment.silent(duration=1500) # Fallback to silence if file missing
+                chime_sound = AudioSegment.silent(duration=1500)
             
             for i, q_data in enumerate(questions_data):
                 scenario = q_data.get("scenario", [])
                 if not scenario:
                     scenario = [{"voice": "narrator", "text": q_data.get("script", "エラーが発生しました。")}]
                 
-                # Start with the Chime sound instead of TTS Ping-Pong!
                 combined_audio = chime_sound
                 
+                # 🟢 3 Distinct Neural Voices for Narrator, Male, Female
                 for j, line in enumerate(scenario):
-                    voice_type = line.get("voice", "female").lower()
+                    voice_type = line.get("voice", "narrator").lower()
                     text = line.get("text", "")
                     if not text: continue
                     
-                    voice_model = "ja-JP-KeitaNeural" if voice_type == "male" else "ja-JP-NanamiNeural"
+                    if voice_type == "male":
+                        voice_model = "ja-JP-KeitaNeural"
+                    elif voice_type == "female":
+                        voice_model = "ja-JP-NanamiNeural"
+                    else:
+                        voice_model = "ja-JP-AoiNeural" # Formal voice for Narrator
+                        
                     temp_file = f"temp_{guild.id}_{i}_{j}.mp3"
                     try:
                         communicate = edge_tts.Communicate(text, voice_model)
@@ -665,7 +666,6 @@ async def process_listening_queue(guild, client):
                 audio_file = f"listening_{guild.id}_{i}.mp3"
                 combined_audio.export(audio_file, format="mp3")
                 
-                # User left mid-quiz check
                 if not user.voice or user.voice.channel.id != new_vc.id:
                     break
                 
@@ -673,14 +673,13 @@ async def process_listening_queue(guild, client):
                 while voice_client.is_playing():
                     await asyncio.sleep(1)
                 
-                # 🟢 4. 100% EPHEMERAL UI
                 embed = discord.Embed(title=f"🎧 {level_full} Question ({i+1}/{q_count})", description=f"**{q_data.get('question', 'Question?')}**\n\n🇦 {q_data.get('options', {}).get('A', 'A')}\n🇧 {q_data.get('options', {}).get('B', 'B')}\n🇨 {q_data.get('options', {}).get('C', 'C')}\n🇩 {q_data.get('options', {}).get('D', 'D')}", color=0x9b59b6)
                 embed.set_footer(text="⏳ You have 30 seconds to answer.")
                 
                 view = ListeningSingleQView(user, q_data.get('answer', 'A'))
                 try:
                     await interaction.edit_original_response(content=f"🎤 **What is the correct answer?**", embed=embed, view=view)
-                except: pass # In case interaction expired
+                except: pass 
                 
                 await view.wait() 
                 
@@ -707,7 +706,7 @@ async def process_listening_queue(guild, client):
                     value=f"*{q.get('explanation', 'No explanation provided.')}*", 
                     inline=False
                 )
-            try: await interaction.edit_original_response(content="🎉 **Session Finished! Returning you to your original VC...**", embed=exp_embed, view=None)
+            try: await interaction.edit_original_response(content="🎉 **Session Finished! Returning you to your original channel...**", embed=exp_embed, view=None)
             except: pass
             
         except Exception as e:
@@ -717,14 +716,13 @@ async def process_listening_queue(guild, client):
             if voice_client and voice_client.is_connected():
                 await voice_client.disconnect()
             
-            # 🟢 5. DRAG BACK & DELETE TEMP VC
             if new_vc:
                 try:
                     if user.voice and user.voice.channel and user.voice.channel.id == new_vc.id:
                         await user.move_to(original_vc)
                 except: pass
                 
-                await asyncio.sleep(10) # 10 seconds buffer before deleting
+                await asyncio.sleep(10) 
                 try: await new_vc.delete()
                 except: pass
                 
@@ -1387,10 +1385,8 @@ class NihongoBot(commands.Bot):
 
     # 🟢 Global Interaction Logger (Background Task) in #user-interation-logs channel
     async def on_interaction(self, interaction: discord.Interaction):
-        # 1. 
-        await super().on_interaction(interaction)
         
-        # 2. Background logging (Error-proof)
+        # Background logging (Error-proof)
         try:
             if not interaction.guild: return
             
