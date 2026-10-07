@@ -825,9 +825,11 @@ class PersistentDailyKanjiView(View):
             response_text = self.cached_responses[cache_key]
         else:
             if trick_type == "visual":
-                prompt = f"Create a short, logical visual memory trick to remember the shape of these JLPT {level} Kanji(s): {kanji_str}. Format cleanly in English."
-            else:
-                prompt = f"Create a short, logical pronunciation trick to remember the Onyomi/Kunyomi reading of these JLPT {level} Kanji(s): {kanji_str}. Format cleanly in English."
+                prompt = f"Create a short, logical visual memory trick for an English speaker to remember the shape/radicals of these JLPT {level} Kanji(s): {kanji_str}. Relate the shapes to a real-life object or scene which can be imagined easily."
+            elif trick_type == "pronunciation":
+                prompt = f"Create a highly creative pronunciation trick for an English speaker to remember the reading of these JLPT {level} Kanji(s): {kanji_str}. Find English words or puns that sound exactly/similar to the Romaji reading."
+            elif trick_type == "story":
+                prompt = f"For the JLPT {level} Kanji(s) '{kanji_str}', create a highly imaginative 1-2 sentence 'Memory Story'. Combine its Visual shape and its Pronunciation (using an English pun) into one unforgettable scenario."
             
             try:
                 response_text = await generate_gemini_response(prompt)
@@ -835,20 +837,30 @@ class PersistentDailyKanjiView(View):
             except Exception as e:
                 return await interaction.followup.send(f"❌ Failed to fetch trick: {e}", ephemeral=True)
 
+        titles = {
+            "visual": "👀 Visual Memory Trick",
+            "pronunciation": "🎵 Pronunciation Trick",
+            "story": "🧠 The Memory Story"
+        }
+        
         embed = discord.Embed(
-            title=f"💡 {'Visual Memory' if trick_type == 'visual' else 'Pronunciation'} Trick", 
+            title=titles[trick_type], 
             description=response_text[:4000], 
             color=0xf1c40f
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="🧠 Visual Memory Trick", style=discord.ButtonStyle.primary, custom_id="kanji_visual")
+    @discord.ui.button(label="👀 Visual Trick", style=discord.ButtonStyle.primary, custom_id="kanji_visual")
     async def btn_visual(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_trick(interaction, "visual")
 
     @discord.ui.button(label="🗣️ Pronunciation Trick", style=discord.ButtonStyle.success, custom_id="kanji_pronounce")
     async def btn_pronunciation(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_trick(interaction, "pronunciation")
+
+    @discord.ui.button(label="🧠 Memory Story", style=discord.ButtonStyle.danger, custom_id="kanji_story")
+    async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_trick(interaction, "story")
 
 class JournalThreadView(View):
     def __init__(self, user, level, original, corrected, thread):
@@ -1374,12 +1386,14 @@ class NihongoBot(commands.Bot):
                 kanji_db.update_one({"level": lvl_name}, {"$set": {"current_index": next_index}}, upsert=True)
 
                 kanji_str = ", ".join(new_kanjis)
-                prompt = f"""You are an expert Japanese Sensei. Explain ALL of the following {len(new_kanjis)} Kanji(s): {kanji_str}.
+                prompt = f"""You are an expert Japanese Sensei who cleared N1 within 2 years by smart-work and not hard-work. Explain ALL of the following {len(new_kanjis)} Kanji(s): {kanji_str}.
                 For EACH Kanji, strictly provide:
                 1. Meaning
                 2. Onyomi & Kunyomi (with Romaji)
                 3. One example of each kanji in a word with Onyomi & Kunyomi pronunciation being used (with romaji).
-                Format the entire response beautifully in Discord Markdown using headings and bullet points. Keep the script entirely in English. Do NOT include memory or pronunciation tricks."""
+                Format the entire response beautifully in Discord Markdown.
+                CRITICAL RULE: For the Kanji character heading itself, you MUST use a Markdown H1 tag (e.g., `# 妹` or `# 業`) so the Kanji appears massively large on Discord.
+                Keep the script entirely in English. Do NOT include memory or pronunciation tricks."""
                 
                 try:
                     explanation = await generate_gemini_response(prompt)
