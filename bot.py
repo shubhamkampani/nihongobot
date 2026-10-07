@@ -530,19 +530,50 @@ async def process_listening_queue(guild, client):
     while listening_queues.get(guild.id, []):
         task = listening_queues[guild.id][0] 
         user = task["user"]
-        vc = task["vc"]
+        original_vc = task["vc"]
         level_full = task["level"]
-        channel = task["channel"]
+        interaction = task["interaction"]
         q_count = task["length"]
         env = task["env"]
         
+        new_vc = None
+        voice_client = None
+        
         try:
             mode_name = "Real Exam Hall" if env == "exam" else "Studio Clear"
-            await channel.send(f"🎧 {user.mention}, starting your **{mode_name}** session in **{vc.name}** now...", delete_after=15)
+            await interaction.edit_original_response(content=f"⏳ Preparing your **{mode_name}** session...", embed=None, view=None)
             
+            # 🟢 1. DYNAMIC PRIVATE VC CREATION
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                user: discord.PermissionOverwrite(view_channel=True, connect=True),
+                guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True, manage_channels=True)
+            }
+            
+            # Make it visible (but unjoinable) to peers of the same JLPT level
+            peer_role = discord.utils.get(guild.roles, name=level_full)
+            if peer_role: overwrites[peer_role] = discord.PermissionOverwrite(view_channel=True, connect=False)
+                
+            # Full access for Admins
+            jr_admin = discord.utils.get(guild.roles, name="Junior Admin（ジュニア・アデュミン）")
+            sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
+            if jr_admin: overwrites[jr_admin] = discord.PermissionOverwrite(view_channel=True, connect=True)
+            if sr_admin: overwrites[sr_admin] = discord.PermissionOverwrite(view_channel=True, connect=True)
+            
+            new_vc = await guild.create_voice_channel(
+                name=f"Listening Practice - {user.display_name}",
+                category=original_vc.category,
+                overwrites=overwrites
+            )
+            
+            # Drag user to new VC
+            if user.voice and user.voice.channel:
+                await user.move_to(new_vc)
+            
+            # Connect bot to new VC
             voice_client = discord.utils.get(client.voice_clients, guild=guild)
-            if voice_client and voice_client.is_connected(): await voice_client.move_to(vc)
-            else: voice_client = await vc.connect()
+            if voice_client and voice_client.is_connected(): await voice_client.move_to(new_vc)
+            else: voice_client = await new_vc.connect()
                 
             level_short = level_full.split(" ")[1]
             
@@ -565,19 +596,13 @@ async def process_listening_queue(guild, client):
             chosen_topic = random.choice(random_topics)
             random_seed = random.randint(1000, 9999999)
             
-            # 🟢 THE ULTIMATE MULTI-VOICE PROMPT
-            prompt = f"""You are an expert JLPT Examiner creating content like 'Nihongo Nook'. Generate exactly {q_count} BRAND NEW, completely distinct Japanese listening scenarios for JLPT {level_short}.
-            CRITICAL RULE 1: Never repeat old scenarios. Use random seed [{random_seed}]. Today's theme inspiration: "{chosen_topic}".
-            CRITICAL RULE 2 (MULTI-VOICE FORMAT): The audio engine supports distinct Male and Female voices. You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator must introduce the situation and ask the questions.
+            # 🟢 2. UPDATED PROMPT (Strict Anti-Stutter Rule)
+            prompt = f"""You are an expert JLPT Examiner creating content like 'Nihongo Nook'. Generate exactly {q_count} BRAND NEW, distinct Japanese listening scenarios for JLPT {level_short}.
+            CRITICAL RULE 1: Never repeat scenarios. Use random seed [{random_seed}]. Theme: {chosen_topic}.
+            CRITICAL RULE 2 (MULTI-VOICE FORMAT): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks questions. Male and Female will hold the conversation.
+            CRITICAL RULE 3 (NO REPETITION): Do NOT repeat words unnaturally to mimic human stuttering (e.g., avoid writing "ふたり、ふたりは" or "使った、使った"). The Japanese must flow perfectly and grammatically clean.
             
-            Follow the STRICT JLPT 'Mondai' Format for EACH scenario:
-            1. Narrator explains the situation.
-            2. Narrator asks the main question.
-            3. Male and Female characters converse naturally.
-            4. Narrator repeats the question.
-            
-            Provide furigana in square brackets exactly after EVERY Kanji used in the options.
-            Output ONLY a valid JSON ARRAY of exactly {q_count} objects, matching this EXACT structure:
+            Output ONLY a valid JSON ARRAY of exactly {q_count} objects:
             [
                 {{
                     "scenario": [
@@ -599,7 +624,6 @@ async def process_listening_queue(guild, client):
             if isinstance(questions_data, dict): questions_data = [questions_data]
             
             ffmpeg_options = '-af "lowpass=f=2500,aecho=0.8:0.7:60:0.4,volume=1.2"' if env == "exam" else ""
-            
             total_score = 0
             start_time = time.time()
             user_choices = []
@@ -607,28 +631,26 @@ async def process_listening_queue(guild, client):
             import edge_tts
             from pydub import AudioSegment
             
+            # 🟢 3. LOAD REAL CHIME SOUND
+            try:
+                chime_sound = AudioSegment.from_file("chime.mp3")
+            except:
+                chime_sound = AudioSegment.silent(duration=1500) # Fallback to silence if file missing
+            
             for i, q_data in enumerate(questions_data):
                 scenario = q_data.get("scenario", [])
-                
-                # Fallback just in case AI messes up the format
                 if not scenario:
-                    script_text = q_data.get("script", "エラーが発生しました。")
-                    scenario = [{"voice": "narrator", "text": script_text}]
-                    
-                # 🟢 Ting-dong added naturally as the narrator's first line!
-                scenario.insert(0, {"voice": "narrator", "text": "ピーンポーン。"})
+                    scenario = [{"voice": "narrator", "text": q_data.get("script", "エラーが発生しました。")}]
                 
-                combined_audio = AudioSegment.empty()
+                # Start with the Chime sound instead of TTS Ping-Pong!
+                combined_audio = chime_sound
                 
-                # 🟢 MULTI-VOICE STITCHING ENGINE
                 for j, line in enumerate(scenario):
                     voice_type = line.get("voice", "female").lower()
                     text = line.get("text", "")
                     if not text: continue
                     
-                    # Assigning correct neural voices (Keita for male, Nanami for female/narrator)
                     voice_model = "ja-JP-KeitaNeural" if voice_type == "male" else "ja-JP-NanamiNeural"
-                    
                     temp_file = f"temp_{guild.id}_{i}_{j}.mp3"
                     try:
                         communicate = edge_tts.Communicate(text, voice_model)
@@ -643,16 +665,22 @@ async def process_listening_queue(guild, client):
                 audio_file = f"listening_{guild.id}_{i}.mp3"
                 combined_audio.export(audio_file, format="mp3")
                 
-                # Play the seamlessly stitched multi-voice audio
+                # User left mid-quiz check
+                if not user.voice or user.voice.channel.id != new_vc.id:
+                    break
+                
                 voice_client.play(discord.FFmpegPCMAudio(audio_file, executable="ffmpeg", options=ffmpeg_options))
                 while voice_client.is_playing():
                     await asyncio.sleep(1)
                 
+                # 🟢 4. 100% EPHEMERAL UI
                 embed = discord.Embed(title=f"🎧 {level_full} Question ({i+1}/{q_count})", description=f"**{q_data.get('question', 'Question?')}**\n\n🇦 {q_data.get('options', {}).get('A', 'A')}\n🇧 {q_data.get('options', {}).get('B', 'B')}\n🇨 {q_data.get('options', {}).get('C', 'C')}\n🇩 {q_data.get('options', {}).get('D', 'D')}", color=0x9b59b6)
                 embed.set_footer(text="⏳ You have 30 seconds to answer.")
                 
                 view = ListeningSingleQView(user, q_data.get('answer', 'A'))
-                msg = await channel.send(content=f"🎤 **{user.mention}, what is the correct answer?**", embed=embed, view=view)
+                try:
+                    await interaction.edit_original_response(content=f"🎤 **What is the correct answer?**", embed=embed, view=view)
+                except: pass # In case interaction expired
                 
                 await view.wait() 
                 
@@ -661,17 +689,16 @@ async def process_listening_queue(guild, client):
                     if view.result: total_score += 1
                 else:
                     user_choices.append("Timeout")
-                    await msg.edit(content="⏳ **Time's up for this question!**", view=None, embed=None)
+                    try: await interaction.edit_original_response(content="⏳ **Time's up for this question!**", view=None, embed=None)
+                    except: pass
                     
                 if os.path.exists(audio_file): os.remove(audio_file)
             
-            await voice_client.disconnect()
             time_taken = round(time.time() - start_time)
-            
             quiz_db.update_one({"_id": user.id}, {"$set": {"level": level_full}, "$inc": {"score": total_score, "time_taken": time_taken}}, upsert=True)
             
-            exp_embed = discord.Embed(title=f"🏁 Listening Complete! (Score: {total_score}/{q_count})", color=discord.Color.green())
-            for i, q in enumerate(questions_data):
+            exp_embed = discord.Embed(title=f"🏁 Listening Complete! (Score: {total_score}/{len(user_choices)})", color=discord.Color.green())
+            for i, q in enumerate(questions_data[:len(user_choices)]):
                 user_ans = user_choices[i]
                 correct_ans = q.get('answer', 'A')
                 mark = "✅ Correct" if user_ans == correct_ans else f"❌ Incorrect (Answer was {correct_ans})"
@@ -680,17 +707,32 @@ async def process_listening_queue(guild, client):
                     value=f"*{q.get('explanation', 'No explanation provided.')}*", 
                     inline=False
                 )
-            await channel.send(content=f"{user.mention} Here is your detailed review!", embed=exp_embed)
+            try: await interaction.edit_original_response(content="🎉 **Session Finished! Returning you to your original VC...**", embed=exp_embed, view=None)
+            except: pass
             
         except Exception as e:
-            await channel.send(f"❌ Listening Error for {user.mention}: {e}")
-            if 'voice_client' in locals() and voice_client and voice_client.is_connected():
+            try: await interaction.edit_original_response(content=f"❌ Listening Error: {e}", embed=None, view=None)
+            except: pass
+        finally:
+            if voice_client and voice_client.is_connected():
                 await voice_client.disconnect()
+            
+            # 🟢 5. DRAG BACK & DELETE TEMP VC
+            if new_vc:
+                try:
+                    if user.voice and user.voice.channel and user.voice.channel.id == new_vc.id:
+                        await user.move_to(original_vc)
+                except: pass
+                
+                await asyncio.sleep(10) # 10 seconds buffer before deleting
+                try: await new_vc.delete()
+                except: pass
                 
         if listening_queues.get(guild.id):
             listening_queues[guild.id].pop(0)
             
     queue_processing[guild.id] = False
+
 
 class QuizSelectionView(View):
     def __init__(self, user, level_full):
@@ -727,7 +769,6 @@ class QuizSelectionView(View):
         if not interaction.user.voice or not interaction.user.voice.channel:
             return await interaction.response.send_message("❌ **You need to join a Voice Channel first to start Listening Practice!**", ephemeral=True)
             
-        # 🟢 Open Settings Menu before Queueing
         class ListeningOptionsView(View):
             def __init__(self, u, lvl):
                 super().__init__(timeout=60)
@@ -758,9 +799,8 @@ class QuizSelectionView(View):
             async def start_btn(self, i, btn):
                 if i.user.id != self.user.id: return
                 
-                # Check Pro limit for 5 Questions
                 if self.length == 5 and not any(r.name == "金 Pro Learners 金" for r in i.user.roles):
-                    return await i.response.send_message("❌ **Exam Mode (5 Qs)** is exclusively for **金 Pro Learners 金**. Free users can only do Quick Practice (1 Q).", ephemeral=True)
+                    return await i.response.send_message("❌ **Exam Mode (5 Qs)** is exclusively for **金 Pro Learners 金**.", ephemeral=True)
                 
                 vc = i.user.voice.channel
                 guild_id = i.guild.id
@@ -769,29 +809,29 @@ class QuizSelectionView(View):
                 for task in listening_queues[guild_id]:
                     if task["user"].id == i.user.id:
                         return await i.response.send_message("⚠️ You are already in the queue!", ephemeral=True)
-                        
+                
+                # We send the Ephemeral processing message here, so we can edit it later!
+                await i.response.send_message(f"⏳ Please wait! Setting up your session...", ephemeral=True)
+                
                 listening_queues[guild_id].append({
                     "user": i.user,
                     "vc": vc,
                     "level": self.level_full,
-                    "channel": i.channel,
+                    "interaction": i, # Passed interaction for ephemeral updates
                     "length": self.length,
                     "env": self.env
                 })
                 
-                qp = len(listening_queues[guild_id])
-                if qp == 1 and not queue_processing.get(guild_id, False):
-                    await i.response.edit_message(content=f"⏳ Joining **{vc.name}** and preparing your {self.env} listening practice...", embed=None, view=None)
+                if len(listening_queues[guild_id]) == 1 and not queue_processing.get(guild_id, False):
                     asyncio.create_task(process_listening_queue(i.guild, i.client))
                 else:
-                    await i.response.edit_message(content=f"⏳ Added to Queue (Position: {qp}). Please wait.", embed=None, view=None)
+                    await i.edit_original_response(content=f"⏳ Added to Queue (Position: {len(listening_queues[guild_id])}). Please wait in {vc.name}.", embed=None, view=None)
                     if not queue_processing.get(guild_id, False):
                         asyncio.create_task(process_listening_queue(i.guild, i.client))
 
         embed = discord.Embed(title="🎧 Listening Setup", description="Customize your practice session before starting:", color=0x3498db)
         await interaction.response.send_message(embed=embed, view=ListeningOptionsView(self.user, self.level_full), ephemeral=True)
             
-
     @discord.ui.button(label="Kanji Reading Quiz", style=discord.ButtonStyle.danger, emoji="🈴")
     async def btn_kanji(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user.id: return
