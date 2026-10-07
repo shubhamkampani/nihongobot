@@ -2429,7 +2429,12 @@ async def process_shadow_queue(guild, client):
             vocab_list = data.get("vocab", [])
             grammar_text = data.get("grammar", "")
             
-            # 2. Connect to VC (Stays connected for the whole loop)
+            # 🟢 2. RANDOM NATIVE VOICE SELECTION FOR THIS SESSION
+            import edge_tts
+            import random
+            session_voice = random.choice(["ja-JP-KeitaNeural", "ja-JP-NanamiNeural"])
+            
+            # 3. Connect to VC (Stays connected for the whole loop)
             voice_client = await vc_channel.connect()
             
             i = 0
@@ -2437,7 +2442,7 @@ async def process_shadow_queue(guild, client):
             accumulated_ja, accumulated_ro, accumulated_en = "", "", ""
             timeout_occurred = False
             
-            # 3. 🟢 THE PROGRESSIVE SHADOWING LOOP (4 ROUNDS)
+            # 4. 🟢 THE PROGRESSIVE SHADOWING LOOP (4 ROUNDS)
             while i < max_rounds:
                 current_line = conversation[i]
                 
@@ -2453,11 +2458,12 @@ async def process_shadow_queue(guild, client):
                     
                 if not current_ja.endswith("。"): current_ja += "。"
                     
-                # Bot Speaks
+                # 🟢 BOT SPEAKS USING EDGE-TTS
                 tts_text = f"{current_ja} さあ、あなたの番です。"
-                tts = gTTS(text=tts_text, lang='ja')
                 tts_filename = f"sensei_{guild.id}_round{i}.mp3"
-                tts.save(tts_filename)
+                
+                communicate = edge_tts.Communicate(tts_text, session_voice)
+                await communicate.save(tts_filename)
                 
                 voice_client.play(discord.FFmpegPCMAudio(tts_filename))
                 while voice_client.is_playing():
@@ -2562,7 +2568,7 @@ async def process_shadow_queue(guild, client):
                     
                 i += 1 # Move to next round
                 
-            # 4. End of Loop & Final Summary
+            # 5. End of Loop & Final Summary
             if voice_client and voice_client.is_connected():
                 await voice_client.disconnect()
                 
@@ -2685,8 +2691,9 @@ class PersistentShadowPanelView(View):
             "2. Click **▶️ Start Shadow Speaking** and type a topic.\n"
             "3. The bot will create a **Private Thread** just for you.\n"
             "4. AI Sensei will join your VC and start a **4-Round Conversation**.\n"
-            "5. Send a Voice Note repeating what Sensei said. Each round, the conversation gets longer!\n"
-            "6. Get your pronunciation score, vocab list, and grammar breakdown at the end.\n\n"
+            "5. Send your Voice Recording by repeating what Sensei said. Each round, the conversation gets longer!\n"
+            "6. Use native discord voice recording (bottom right), if using discord mobile app, if not then use your device's voice recording software and share the audio file in private channel.\n"
+            "7. Get your pronunciation score, vocab list, and grammar breakdown at the end.\n\n"
             "*Note: The private thread will auto-delete 20 minutes after completion.*"
         )
         embed = discord.Embed(title="How to Shadow Speak", description=help_text, color=0x3498db)
