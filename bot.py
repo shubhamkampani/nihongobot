@@ -114,9 +114,32 @@ def extract_json(raw_text):
         print(f"⚠️ JSON Parse Failed: {e}\nRaw AI Output:\n{raw_text}")
         return [{"question": "AI Formatting Error", "options": {"A": "Wait", "B": "Retry", "C": "Cancel", "D": "Help"}, "answer": "B"}]
 
+# 🟢 503 Error Tracker Global Dictionary
+error_503_tracker = {"count": 0, "first_time": 0, "last_reported": 0}
+
+async def trigger_admin_503_alert():
+    try:
+        if len(bot.guilds) > 0:
+            guild = bot.guilds[0]
+            log_ch = discord.utils.get(guild.channels, name="admin-logs")
+            if log_ch:
+                founder = discord.utils.get(guild.roles, name="Founder（ファウンダ）")
+                sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
+                jr_admin = discord.utils.get(guild.roles, name="Junior Admin（ジュニア・アデュミン）")
+                
+                ping_str = f"{founder.mention if founder else ''} {sr_admin.mention if sr_admin else ''} {jr_admin.mention if jr_admin else ''}"
+                embed = discord.Embed(
+                    title="🚨 AI Server Overload (Error 503)", 
+                    description="Google's Gemini API has crashed/overloaded **3 times in the last 1 minute!**\n\n*Note: Users are currently seeing a funny 'Brain Fried' message instead of the raw code. This is a Google-side issue, please wait for the traffic to reduce. Restarting the bot will NOT fix this, they just need to simply wait for sometime.*", 
+                    color=0xe74c3c
+                )
+                bot.loop.create_task(log_ch.send(content=ping_str, embed=embed))
+    except Exception as e:
+        print(f"Failed to send 503 admin alert: {e}")
+
 # --- 🧠 DIRECT GEMINI REST API ---
 async def generate_gemini_response(prompt):
-    global CURRENT_KEY_INDEX
+    global CURRENT_KEY_INDEX, error_503_tracker
     if not API_KEYS: 
         raise Exception("No GEMINI_API_KEY found in .env!")
     
@@ -136,7 +159,6 @@ async def generate_gemini_response(prompt):
                 if resp.status == 200:
                     data = await resp.json()
                     
-                    # 🟢 Usage Tracking to MongoDB (PST Midnight Reset Friendly)
                     try:
                         usage = data.get('usageMetadata', {})
                         total_tokens = usage.get('totalTokenCount', 0)
@@ -161,6 +183,24 @@ async def generate_gemini_response(prompt):
                     if attempt < len(backoff_times):
                         await asyncio.sleep(wait_time)
                         continue
+                        
+                elif resp.status in [503, 500]:
+                    # 🟢 503 Tracker Logic
+                    now = time.time()
+                    if now - error_503_tracker["first_time"] > 60:
+                        error_503_tracker["count"] = 1
+                        error_503_tracker["first_time"] = now
+                    else:
+                        error_503_tracker["count"] += 1
+                        
+                    # If 3 times in 1 minute, and hasn't reported in the last 2 minutes
+                    if error_503_tracker["count"] >= 3 and (now - error_503_tracker["last_reported"] > 120):
+                        error_503_tracker["last_reported"] = now
+                        await trigger_admin_503_alert()
+                        
+                    # 🟢 Funny User-Facing Error
+                    raise Exception("🤯 **Sensei's brain is frying after reading so many kanjis (AI is overloaded). Count to 10 and retry the same command again.** 🍵 *少し待ってから、もう一度やり直してください!*")
+                    
                 else:
                     err_text = await resp.text()
                     raise Exception(f"HTTP {resp.status}: {err_text}")
@@ -229,14 +269,15 @@ class PlacementQuizView(View):
         except: pass
 
 async def generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, force_limit=10):
-    half_limit = force_limit // 2
+    # 🟢 70% Current Level Kanji, 30% Lower Levels
+    current_limit = int(force_limit * 0.70)
     
-    # 50% current level kanji, 50% lower levels (agar lower level exist karti hai)
     if kanjis_lower:
-        selected_kanjis = random.sample(kanjis_current, min(half_limit, len(kanjis_current)))
-        selected_kanjis += random.sample(kanjis_lower, min(force_limit - len(selected_kanjis), len(kanjis_lower)))
+        selected_kanjis = random.sample(kanjis_current, min(current_limit, len(kanjis_current)))
+        remaining_slots = force_limit - len(selected_kanjis)
+        selected_kanjis += random.sample(kanjis_lower, min(remaining_slots, len(kanjis_lower)))
     else:
-        # N5 walo ke liye sirf unka level hi aayega
+        # N5 ke liye sirf unka level hi aayega
         selected_kanjis = random.sample(kanjis_current, min(force_limit, len(kanjis_current)))
         
     random.shuffle(selected_kanjis)
@@ -245,10 +286,11 @@ async def generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, fo
     prompt = f"""You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice Kanji Reading questions for JLPT {level_short}.
     CRITICAL RULES:
     1. You MUST use ONLY words formed from these specific Kanjis: {kanji_str}.
-    2. The 'question' MUST be visually large using markdown. Format it exactly like this: "What is the correct reading for this word?\\n# [Insert Kanji Word Here]". Do NOT use bold markdown (**) around the Kanji. Do not add any furigana in the question.
+    2. The 'question' MUST be visually large using markdown. Format it exactly like this: "What is the correct reading for this word?\\n# [Insert Kanji Word Here]". Do NOT use bold markdown (**) around the Kanji.
     3. The 4 options (A, B, C, D) MUST be strictly in 100% Hiragana. Do not use Romaji or English.
-    4. Provide a very brief English 'explanation' of the meaning of the Kanji word.
-    5. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Output ONLY a valid JSON array of objects.
+    4. NO DUPLICATES: All 4 options MUST be completely different strings. Do NOT generate identical options. The 3 distractors should be genuine words in japanese language, if possible related to kanji meaning but as said not same as the correct answer.
+    5. Provide a very brief English 'explanation' of the meaning of the Kanji word.
+    6. CRITICAL JSON RULE: Use strictly double quotes (") for all keys and string values. Output ONLY a valid JSON array of objects.
 
     Output format:
     [{{
@@ -263,7 +305,6 @@ async def generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, fo
     if not questions_data or len(questions_data) == 0:
         raise ValueError("No Kanji questions generated.")
         
-    # 🟢 STRICT PYTHON SHUFFLING LOGIC (Breaks the Option 'A' always correct Pattern)
     for q in questions_data:
         try:
             correct_val = q['options'][q['answer']]
@@ -280,7 +321,7 @@ async def generate_kanji_quiz_data(level_short, kanjis_current, kanjis_lower, fo
             continue
             
     return questions_data
-
+    
 async def generate_quiz_data(level_full, is_grammar=False, topic="", force_limit=10):
     level_short = level_full.split(" ")[1] 
     prompt = f"You are an expert JLPT Examiner. Generate exactly {force_limit} multiple-choice questions for JLPT {level_short}."
@@ -591,11 +632,11 @@ async def process_listening_queue(guild, client):
             chosen_topic = random.choice(random_topics)
             random_seed = random.randint(1000, 9999999)
             
-            # 🟢 FIX 1: Options must be ONLY in Japanese, No English translation for options
+            # 🟢 FIX 1: Options must be ONLY in Japanese, No English translation for options`
             prompt = f"""You are an expert JLPT Examiner. Generate exactly {q_count} BRAND NEW, distinct Japanese listening scenarios for JLPT {level_short}. Use vocabulary which should be appropriate for {level_short}, don't overburden with unnecessary vocabulary which is not required for this level.
             CRITICAL RULE 1: Never repeat scenarios. Use random seed [{random_seed}]. Theme: {chosen_topic}.
             CRITICAL RULE 2 (MULTI-VOICE FORMAT): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks questions.
-            CRITICAL RULE 3 (JAPANESE OPTIONS ONLY): The 4 options (A, B, C, D) MUST be strictly in Japanese (Kanji/Kana). NEVER translate the options to English. Only the "question" field should be translated to English.
+            CRITICAL RULE 3 (FURIGANA OPTIONS): The 4 options (A, B, C, D) MUST be strictly in Japanese. NEVER translate them to English. If you use ANY Kanji in the options, you MUST append its furigana in square brackets right next to it (e.g., 毎日[まいにち]). Only the "question" field should be in English.
             CRITICAL RULE 4 (NO REPETITION): Do NOT repeat words unnaturally to mimic human stuttering (e.g., avoid writing "ふたり、ふたりは"). The Japanese must flow perfectly clean.
             
             Output ONLY a valid JSON ARRAY of exactly {q_count} objects:
@@ -1633,7 +1674,11 @@ class NihongoBot(commands.Bot):
                     embed.set_footer(text=f"Kanji: {kanji_str} | Level: {lvl_name}")
                     
                     view = PersistentDailyKanjiView()
-                    await channel.send(embed=embed, view=view)
+                    msg = await channel.send(embed=embed, view=view)
+                    
+                    # 🟢 NAYA: Save Message Hyperlink to DB for Dokkai linking!
+                    for k in new_kanjis:
+                        kanji_db.update_one({"kanji_char": k}, {"$set": {"url": msg.jump_url, "level": lvl_name}}, upsert=True)
 
                 except Exception as e:
                     print(f"❌ Error dropping {lvl_name} Kanji: {e}")
@@ -1656,50 +1701,60 @@ class NihongoBot(commands.Bot):
         topic = random.choice(topics)
         
         level_configs = [
-            ("N5", "n5-daily-dokkai"),
-            ("N4", "n4-daily-dokkai"),
-            ("N3", "n3-daily-dokkai"),
-            ("N2", "n2-daily-dokkai"),
-            ("N1", "n1-daily-dokkai")
+            ("N5", "n5-daily-dokkai", N5_KANJI),
+            ("N4", "n4-daily-dokkai", N4_KANJI),
+            ("N3", "n3-daily-dokkai", N3_KANJI),
+            ("N2", "n2-daily-dokkai", N2_KANJI),
+            ("N1", "n1-daily-dokkai", N1_KANJI)
         ]
         
         for guild in self.guilds:
-            for lvl_name, ch_keyword in level_configs:
+            for lvl_name, ch_keyword, kanji_list in level_configs:
                 channel = discord.utils.find(lambda c: ch_keyword in c.name.lower(), guild.channels)
                 if not channel:
                     continue
                     
-                # 🟢 NAYA LOGIC: Check if level needs Romaji (Only N5 & N4)
+                # Fetch covered kanjis to prevent AI from adding furigana to them
+                db_data = kanji_db.find_one({"level": lvl_name})
+                current_idx = db_data["current_index"] if db_data else 0
+                covered_kanjis = "".join(kanji_list[:current_idx]) if current_idx > 0 else ""
+                
                 needs_romaji = lvl_name in ["N5", "N4"]
                 
                 prompt = f"""You are an expert Japanese linguist and JLPT examiner.
                 Task: Generate a short narrative (max 300 Japanese characters) about '{topic}'.
                 Constraint 1: Strictly use ONLY vocabulary and grammar points from JLPT levels N5 up to {lvl_name}.
-                Constraint 2: Do not use complex Kanji outside of the specified JLPT level unless furigana is provided in parenthesis."""
+                Constraint 2 (SMART FURIGANA): The user ALREADY KNOWS these kanjis: [{covered_kanjis}]. Do NOT add furigana to these kanjis. For ANY OTHER Kanji you use that is NOT in this list, you MUST provide furigana in parentheses immediately after it (e.g., 漢字（かんじ）)."""
                 
-                # 🟢 PROMPT CONDITION: Romaji sirf tab maangega jab level N5/N4 ho
                 if needs_romaji:
-                    prompt += """\nOutput Format: Return ONLY valid JSON with exactly three keys: "title", "story_content", and "romaji" (the exact romaji pronunciation of the story text). Do not add trailing commas."""
+                    prompt += """\nOutput Format: Return ONLY valid JSON with exactly three keys: "title", "story_content", and "romaji" (the exact romaji pronunciation of the story text)."""
                 else:
-                    prompt += """\nOutput Format: Return ONLY valid JSON with exactly two keys: "title" and "story_content". Do not add trailing commas."""
+                    prompt += """\nOutput Format: Return ONLY valid JSON with exactly two keys: "title" and "story_content"."""
                 
                 try:
                     raw_text = await generate_gemini_response(prompt)
                     story_data = extract_json(raw_text)
-                    
-                    if isinstance(story_data, list):
-                        story_data = story_data[0]
+                    if isinstance(story_data, list): story_data = story_data[0]
 
                     title = story_data.get("title", f"{lvl_name} Daily Reading")
                     content = story_data.get("story_content", "Could not generate story.")
                     romaji = story_data.get("romaji", "")
 
-                    # 🟢 APPEND ROMAJI SPOILER: Story ke theek niche tumhare format mein
+                    # 🟢 PYTHON HYPERLINK INJECTOR
+                    # DB se saari covered kanjis aur unke links uthao
+                    db_kanjis = kanji_db.find({"level": lvl_name, "url": {"$exists": True}})
+                    for doc in db_kanjis:
+                        k_char = doc.get("kanji_char")
+                        k_url = doc.get("url")
+                        # Replacing kanji in story with discord hyperlink
+                        if k_char and k_char in content:
+                            content = content.replace(k_char, f"[{k_char}]({k_url})")
+
                     if needs_romaji and romaji:
                         content += f"\n\n**Romaji translation (click to reveal):**\n||{romaji}||"
 
                     embed = discord.Embed(title=f"🎁 Daily Free Reading: {title}", description=content, color=0x3498db)
-                    embed.set_footer(text=f"Level: {lvl_name} | Topic: {topic}")
+                    embed.set_footer(text=f"Level: {lvl_name} | Click the blue kanjis to jump to their Sensei Breakdown!")
                     
                     view = PersistentFreemiumStoryView()
                     await channel.send(embed=embed, view=view)
