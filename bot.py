@@ -2769,5 +2769,52 @@ async def setup_shadow(interaction: discord.Interaction):
     
     await interaction.channel.send(embed=embed, view=PersistentShadowPanelView())
     await interaction.followup.send("✅ Panel deployed successfully!", ephemeral=True)
+
+# ==========================================
+# 🛠️ ONE-TIME KANJI LINK SYNC COMMAND
+# ==========================================
+@bot.tree.command(name="sync_kanji_links", description="[Admin Only] Scan all daily-kanji channels & save old links to Database.")
+async def sync_kanji_links(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Sirf Admin/Founder run kar payenge
+    if not any(r.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for r in interaction.user.roles): 
+        return await interaction.followup.send("❌ Access Denied.", ephemeral=True)
+        
+    guild = interaction.guild
+    levels = ["N5", "N4", "N3", "N2", "N1"]
+    total_synced = 0
+    
+    await interaction.followup.send("⏳ Scanning all daily-kanji channels. This might take a minute...", ephemeral=True)
+    
+    for lvl in levels:
+        ch_keyword = f"{lvl.lower()}-daily-kanji"
+        channel = discord.utils.find(lambda c: ch_keyword in c.name.lower(), guild.channels)
+        
+        if not channel:
+            continue
+            
+        # Pichle 500 messages scan karega
+        async for msg in channel.history(limit=500):
+            if msg.author == bot.user and msg.embeds:
+                emb = msg.embeds[0]
+                if emb.footer and emb.footer.text and "Kanji: " in emb.footer.text:
+                    try:
+                        # Extract kanjis from footer text "Kanji: 一, 二, 三 | Level: N5"
+                        parts = emb.footer.text.split(" | ")
+                        kanji_part = parts[0].replace("Kanji: ", "")
+                        
+                        for k in [x.strip() for x in kanji_part.split(",")]:
+                            # Database mein URL save karna (without overwriting current index)
+                            kanji_db.update_one(
+                                {"kanji_char": k, "level": lvl}, 
+                                {"$set": {"url": msg.jump_url, "level": lvl}}, 
+                                upsert=True
+                            )
+                            total_synced += 1
+                    except Exception as e:
+                        print(f"Error parsing kanji from message {msg.id}: {e}")
+                        
+    await interaction.followup.send(f"✅ Scanning Complete! Successfully saved/updated **{total_synced}** old Kanji links to the Database. Kal se Dokkai mein links aane lagenge!", ephemeral=True)
     
 bot.run(os.environ.get("BOT_TOKEN"))
