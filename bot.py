@@ -632,12 +632,12 @@ async def process_listening_queue(guild, client):
             chosen_topic = random.choice(random_topics)
             random_seed = random.randint(1000, 9999999)
             
-            # 🟢 FIX 1: Options must be ONLY in Japanese, No English translation for options`
-            prompt = f"""You are an expert JLPT Examiner. Generate exactly {q_count} BRAND NEW, distinct Japanese listening scenarios for JLPT {level_short}. Use vocabulary which should be appropriate for {level_short}, don't overburden with unnecessary vocabulary which is not required for this level.
-            CRITICAL RULE 1: Never repeat scenarios. Use random seed [{random_seed}]. Theme: {chosen_topic}.
-            CRITICAL RULE 2 (MULTI-VOICE FORMAT): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks questions.
-            CRITICAL RULE 3 (FURIGANA OPTIONS): The 4 options (A, B, C, D) MUST be strictly in Japanese. NEVER translate them to English. If you use ANY Kanji in the options, you MUST append its furigana in square brackets right next to it (e.g., 毎日[まいにち]). Only the "question" field should be in English.
-            CRITICAL RULE 4 (NO REPETITION): Do NOT repeat words unnaturally to mimic human stuttering (e.g., avoid writing "ふたり、ふたりは"). The Japanese must flow perfectly clean.
+            prompt = f"""You are an expert JLPT Examiner creating 'Nihongo Nook' style audio tests. Generate exactly {q_count} BRAND NEW, highly distinct Japanese listening scenarios for JLPT {level_short}.
+            CRITICAL RULE 1 (DIVERSITY): Never repeat scenarios. Seed: [{random_seed}]. If generating multiple questions, EACH question MUST have a completely DIFFERENT topic/setting from the others. Do not stick to just one theme.
+            CRITICAL RULE 2 (LENGTH & GRAMMAR): The conversation between the male and female characters MUST be detailed and realistic, containing at least 5 to 6 lines of dialogue and can be more if required as per {level_short}. You MUST strictly incorporate grammar structures specific to the {level_short} level throughout the conversation.
+            CRITICAL RULE 3 (MULTI-VOICE): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks the question.
+            CRITICAL RULE 4 (FURIGANA OPTIONS): The 4 options (A, B, C, D) MUST be strictly in Japanese. NEVER translate them to English. DO NOT USE Kanjis in options, just pure hiragana and katakana where-ever required. Only the "question" field should be in English.
+            CRITICAL RULE 5 (ZERO STUTTERING): ABSOLUTELY NO WORD REPETITION. Do NOT write things like "あの、あの" or "ふたり、ふたりは". The Japanese must be 100% grammatically flawless and flow perfectly without any human-like stutters.
             
             Output ONLY a valid JSON ARRAY of exactly {q_count} objects:
             [
@@ -645,8 +645,8 @@ async def process_listening_queue(guild, client):
                     "scenario": [
                         {{"voice": "narrator", "text": "男の人と女の人が話しています。"}},
                         {{"voice": "narrator", "text": "男の人は何を買いますか。"}},
-                        {{"voice": "male", "text": "すみません、これをください。"}},
-                        {{"voice": "female", "text": "はい、かしこまりました。"}},
+                        {{"voice": "male", "text": "..."}},
+                        {{"voice": "female", "text": "..."}},
                         {{"voice": "narrator", "text": "男の人は何を買いますか。"}}
                     ],
                     "question": "The English translation of the main question",
@@ -659,6 +659,22 @@ async def process_listening_queue(guild, client):
             raw_text = await generate_gemini_response(prompt)
             questions_data = extract_json(raw_text)
             if isinstance(questions_data, dict): questions_data = [questions_data]
+            
+            # 🟢 PYTHON SHUFFLE LOGIC (FOR SHUFFLING OPTIONS)
+            for q in questions_data:
+                try:
+                    correct_val = q['options'][q['answer']]
+                    vals = list(q['options'].values())
+                    random.shuffle(vals)
+                    labels = ["A", "B", "C", "D"]
+                    new_options = {}
+                    for idx, val in enumerate(vals):
+                        new_options[labels[idx]] = val
+                        if val == correct_val:
+                            q['answer'] = labels[idx]
+                    q['options'] = new_options
+                except KeyError:
+                    continue
             
             ffmpeg_options = '-af "lowpass=f=2500,aecho=0.8:0.7:60:0.4,volume=1.2"' if env == "exam" else ""
             total_score = 0
