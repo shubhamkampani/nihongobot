@@ -1574,6 +1574,7 @@ class NihongoBot(commands.Bot):
         self.daily_kanji_loop.start()
         self.freemium_dokkai_loop.start()
         self.ticket_cleanup_loop.start() # 🟢 Start ticket auto-deletion loop
+        self.srs_review_loop.start() # 🟢 Start Visual Vault loop
             #... existing views ...
         self.add_view(WelcomeView())
         self.add_view(PersistentJournalView())
@@ -1693,6 +1694,52 @@ class NihongoBot(commands.Bot):
         elif now_jst.weekday() == 6 and now_jst.hour == 22 and now_jst.minute == 2:
             self.weekly_reset_done = False
 
+    #TASK LOOP FOR VOCAB VAULT
+    @tasks.loop(minutes=1)
+    async def srs_review_loop(self):
+        now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+        
+        # 🟢 Runs at 8:30 PM JST (20:30) Every Day
+        if now_jst.hour == 20 and now_jst.minute == 30:
+            if not getattr(self, 'srs_review_done', False):
+                self.srs_review_done = True
+                await self.trigger_daily_srs()
+        elif now_jst.hour == 20 and now_jst.minute == 31:
+            self.srs_review_done = False
+
+    async def trigger_daily_srs(self):
+        current_time = int(time.time())
+        due_words = list(vocab_db.find({"next_review": {"$lte": current_time}}))
+        if not due_words: return
+        
+        user_reviews = {}
+        for w in due_words:
+            uid = w["user_id"]
+            if uid not in user_reviews: user_reviews[uid] = []
+            user_reviews[uid].append(w)
+            
+        for guild in self.guilds:
+            main_channel = discord.utils.get(guild.channels, name="📸・vocab-vault")
+            if not main_channel: continue
+            
+            for uid, words in user_reviews.items():
+                user = guild.get_member(uid)
+                if not user: continue
+                
+                thread_name = f"🧵 {user.name}'s Vault"
+                thread = discord.utils.get(main_channel.threads, name=thread_name)
+                if not thread: continue
+                
+                embed = discord.Embed(
+                    title="🔔 Daily Review Time!", 
+                    description=f"Sensei is here! You have **{len(words)}** visual flashcards due for review today.\n\nKeep your streak alive to move words into your long-term memory (Level 5).", 
+                    color=0xf1c40f
+                )
+                view = StartReviewView(user, words)
+                try: await thread.send(content=user.mention, embed=embed, view=view)
+                except: pass
+
+    
     @tasks.loop(minutes=1)
     async def daily_kanji_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
@@ -3102,5 +3149,126 @@ async def on_message(message: discord.Message):
                         
     await bot.process_commands(message)
 
+# ==========================================
+# 🧠 VISUAL MEMORY VAULT (SPACED REPETITION ENGINE)
+# ==========================================
+import random
+
+class FlashcardQuizView(View):
+    def __init__(self, user, words, current_idx=0):
+        super().__init__(timeout=None)
+        self.user = user
+        self.words = words
+        self.current_idx = current_idx
+        self.setup_ui()
+        
+    def setup_ui(self):
+        word = self.words[self.current_idx]
+        self.correct_kanji = word.get('kanji', 'Error')
+        self.current_word_data = word
+        
+        # 🟢 SMART DISTRACTORS: Pick 3 random words from DB as wrong options (Zero API Call!)
+        distractors = list(vocab_db.aggregate([
+            {"$match": {"kanji": {"$ne": self.correct_kanji}}},
+            {"$sample": {"size": 3}}
+        ]))
+        
+        options = [word] + distractors
+        
+        # Fallback words if DB is too new/empty
+        fallbacks = [
+            {"kanji": "猫", "kana": "ねこ", "english": "Cat"},
+            {"kanji": "水", "kana": "みず", "english": "Water"},
+            {"kanji": "本", "kana": "ほん", "english": "Book"},
+            {"kanji": "車", "kana": "くるま", "english": "Car"}
+        ]
+        while len(options) < 4:
+            options.append(fallbacks.pop())
+            
+        random.shuffle(options)
+        
+        for idx, opt in enumerate(options):
+            label = f"{opt.get('kanji', '')} ({opt.get('kana', '')})"
+            btn = Button(label=label[:80], custom_id=f"vocab_{idx}_{opt.get('kanji')}", style=discord.ButtonStyle.primary)
+            btn.callback = self.answer_callback
+            self.add_item(btn)
+
+    async def answer_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user.id: return
+        
+        selected_kanji = interaction.data['custom_id'].split("_", 2)[2]
+        is_correct = (selected_kanji == self.correct_kanji)
+        
+        current_lvl = self.current_word_data.get('level', 1)
+        doc_id = self.current_word_data.get('_id')
+        
+        if is_correct:
+            # 🟢 NAYA LOGIC: Mastery & DB Cleanup
+            if current_lvl >= 4: 
+                vocab_db.delete_one({"_id": doc_id})
+                msg = f"🏆 **MASTERED!**\n\n✅ **Correct!** You have successfully committed **{self.correct_kanji}** to your long-term memory! It has been officially archived from your daily flashcards.\n\n*🧠 Sensei's Logic: You've proven you know this word deeply. We have removed it from the database to keep your daily reviews fresh and focused on newer, harder words!*"
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                new_lvl = current_lvl + 1
+                intervals = {1: 1, 2: 3, 3: 7, 4: 14} # Spaced Repetition Days
+                add_days = intervals[new_lvl]
+                next_review = int(time.time()) + (add_days * 86400)
+                
+                vocab_db.update_one({"_id": doc_id}, {"$set": {"level": new_lvl, "next_review": next_review}})
+                
+                msg = f"✅ **Correct!**\n\n📈 **Level Promoted:** Level {current_lvl} ➡️ Level {new_lvl}\n📅 **Next Review:** In {add_days} Days.\n\n*🧠 Sensei's Logic: Memory builds through Spaced Repetition. You remembered it today, so we will wait longer ({add_days} days) before testing you again to lock it in your long-term memory!*"
+                await interaction.response.send_message(msg, ephemeral=True)
+            
+        else:
+            new_lvl = 1
+            next_review = int(time.time()) + 86400 # 1 Day
+            vocab_db.update_one({"_id": doc_id}, {"$set": {"level": new_lvl, "next_review": next_review}})
+            
+            msg = f"❌ **Incorrect! The correct answer was {self.correct_kanji} ({self.current_word_data.get('english')}).**\n\n📉 **Level Demoted:** Level {current_lvl} ➡️ Level 1\n📅 **Next Review:** Tomorrow.\n\n*🧠 Sensei's Logic: Forgetting is a normal part of learning. Since you missed it, we reset the word to Level 1 and will test you again tomorrow to strengthen the foundation.*"
+            
+            has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+            if has_pro:
+                await interaction.response.defer(ephemeral=True)
+                prompt = f"The user forgot the Japanese word '{self.correct_kanji}' (reading: {self.current_word_data.get('kana')}, meaning: {self.current_word_data.get('english')}). Create a very short, funny, 1-2 sentence memory trick/mnemonic combining its English pronunciation and meaning to help them remember it forever."
+                try:
+                    trick = await generate_gemini_response(prompt)
+                    msg += f"\n\n🎁 **Pro Mnemonic Trick:**\n*{trick}*"
+                except: pass
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+                
+        # 🟢 Move to next question
+        self.current_idx += 1
+        if self.current_idx < len(self.words):
+            new_view = FlashcardQuizView(self.user, self.words, self.current_idx)
+            next_word = self.words[self.current_idx]
+            
+            embed = discord.Embed(title=f"📸 Visual Flashcard ({self.current_idx+1}/{len(self.words)})", description="What is the Japanese word for the object shown in this image?", color=0x3498db)
+            embed.set_image(url=next_word['image_url'])
+            
+            await interaction.message.edit(embed=embed, view=new_view)
+        else:
+            embed = discord.Embed(title="🎉 Review Complete!", description="You have completed all your visual flashcards for today. Awesome job maintaining your study streak!", color=0x2ecc71)
+            await interaction.message.edit(embed=embed, view=None)
+
+class StartReviewView(View):
+    def __init__(self, user, words):
+        super().__init__(timeout=None)
+        self.user = user
+        self.words = words
+        
+    @discord.ui.button(label="▶️ Start Daily Review", style=discord.ButtonStyle.success)
+    async def btn_start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.defer()
+        
+        new_view = FlashcardQuizView(self.user, self.words, 0)
+        word = self.words[0]
+        
+        embed = discord.Embed(title=f"📸 Visual Flashcard (1/{len(self.words)})", description="What is the Japanese word for the object shown in this image?", color=0x3498db)
+        embed.set_image(url=word['image_url'])
+        
+        await interaction.message.edit(embed=embed, view=new_view)
     
 bot.run(os.environ.get("BOT_TOKEN"))
