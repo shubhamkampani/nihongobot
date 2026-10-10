@@ -25,6 +25,7 @@ import speech_recognition as sr
 from difflib import SequenceMatcher
 from gtts import gTTS
 import os
+import base64 #Dependency for AI Vision (used in Vocab-Vault)
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -204,6 +205,47 @@ async def generate_gemini_response(prompt):
                 else:
                     err_text = await resp.text()
                     raise Exception(f"HTTP {resp.status}: {err_text}")
+
+# --- 👁️ AI VISION ENGINE (For Vocab Vault) ---
+async def generate_vision_response(prompt, image_url):
+    global CURRENT_KEY_INDEX
+    if not API_KEYS: 
+        raise Exception("No GEMINI_API_KEY found!")
+        
+    async with aiohttp.ClientSession() as session:
+        # 1. Download image from Discord securely
+        async with session.get(image_url) as img_resp:
+            if img_resp.status != 200:
+                raise Exception("Could not download image from Discord.")
+            img_bytes = await img_resp.read()
+            
+        # 2. Convert to Base64 for Gemini
+        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+        
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inlineData": {"mimeType": "image/jpeg", "data": img_b64}}
+                ]
+            }],
+            "generationConfig": {"temperature": 0.3} # Low temp for accurate vocab
+        }
+        headers = {"Content-Type": "application/json"}
+        
+        current_key = API_KEYS[CURRENT_KEY_INDEX]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash:generateContent?key={current_key}"
+        
+        async with session.post(url, json=payload, headers=headers) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data['candidates'][0]['content']['parts'][0]['text']
+            elif resp.status == 429:
+                CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
+                raise Exception("Rate limit hit. Retrying soon.")
+            else:
+                err_text = await resp.text()
+                raise Exception(f"Vision API Error: {err_text}")
 
 # --- 🧠 PLACEMENT & QUIZ UI LOGIC ---
 class ForceClaimView(View):
@@ -2783,5 +2825,56 @@ async def setup_shadow(interaction: discord.Interaction):
     
     await interaction.channel.send(embed=embed, view=PersistentShadowPanelView())
     await interaction.followup.send("✅ Panel deployed successfully!", ephemeral=True)
+
+# ---------------------------------------------------------
+# 📸 VISUAL MEMORY VAULT (VOCAB-DEX)
+# ---------------------------------------------------------
+@bot.tree.command(name="vocabvault", description="Create your personal Smart Visual Vocabulary Vault.")
+async def vocab_vault(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if user has learner role
+    if not any(r.name in ROLE_NAMES for r in interaction.user.roles):
+        return await interaction.followup.send("❌ You need a JLPT Learner role (N5-N1) to unlock the Vocab Vault.", ephemeral=True)
+        
+    guild = interaction.guild
+    
+    # Ensure the main channel exists
+    vault_category = discord.utils.get(guild.categories, name="🧠 SMART LEARNING")
+    if not vault_category:
+        vault_category = await guild.create_category("🧠 SMART LEARNING")
+        
+    # 🟢 UPDATED CHANNEL EMOJI HERE
+    main_channel = discord.utils.get(guild.channels, name="📸・vocab-vault")
+    if not main_channel:
+        main_channel = await guild.create_text_channel(name="📸・vocab-vault", category=vault_category)
+
+    # 🟢 CHECK 1: Does user already have a Vault Thread?
+    thread_name = f"🧵 {interaction.user.name}'s Vault"
+    existing_thread = discord.utils.get(main_channel.threads, name=thread_name)
+    
+    if existing_thread:
+        return await interaction.followup.send(f"⚠️ You already have an active Vocab Vault!\n👉 **Jump here:** {existing_thread.mention}\n\n*Just drop your photos inside that thread!*", ephemeral=True)
+
+    # 🟢 CREATE NEW VAULT THREAD
+    try:
+        # Send a dummy message to create a thread under it
+        dummy_msg = await main_channel.send(f"Vault created for {interaction.user.mention}.")
+        thread = await dummy_msg.create_thread(
+            name=thread_name, 
+            auto_archive_duration=10080 # 7 days (Prevents it from closing too fast)
+        )
+        await dummy_msg.delete() # Clean up the dummy message
+        
+        embed = discord.Embed(
+            title="📸 Welcome to your Visual Memory Vault!", 
+            description="Your personal Japanese Pokédex is ready.\n\n**How to use:**\n1. Take a photo of ANY object in real life.\n2. **Drop/Upload the photo directly into this thread.**\n3. Sensei will automatically scan it and help you memorize it forever!\n\n*(No commands needed. Just send photos!)*", 
+            color=0x2ecc71
+        )
+        await thread.send(content=interaction.user.mention, embed=embed)
+        await interaction.followup.send(f"✅ **Vault Activated!**\n👉 **Click here to enter:** {thread.mention}", ephemeral=True)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to create Vault: {e}", ephemeral=True)
     
 bot.run(os.environ.get("BOT_TOKEN"))
