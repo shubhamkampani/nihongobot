@@ -45,6 +45,8 @@ try:
     kanji_db = db["kanji_tracker"]
     # 🟢 Token Tracking Collection
     token_db = db["api_tokens"]
+    # 🟢 For storing user flashcards (Vocab Vault)
+    vocab_db = db["vocab_vault"]
     print("✅ MongoDB Connected!")
 except Exception as e:
     print(f"❌ MongoDB Error: {e}")
@@ -1475,6 +1477,35 @@ class WelcomeView(View):
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ AI Initialization Error: {e}")
 
+# 🗑️ DELETE VOCAB VAULT
+class DeleteVaultView(View):
+    def __init__(self, user, thread):
+        super().__init__(timeout=60)
+        self.user = user
+        self.thread = thread
+
+    @discord.ui.button(label="Yes, Delete Permanently", style=discord.ButtonStyle.danger)
+    async def btn_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.edit_message(content="⏳ Deleting your vault data...", embed=None, view=None)
+        
+        # 1. Database se user ka saara srs deck delete karna
+        vocab_db.delete_one({"_id": interaction.user.id})
+        
+        # 2. Discord se Thread delete karna
+        try:
+            await self.thread.delete()
+        except:
+            pass
+            
+        try: await interaction.edit_original_response(content="✅ Your Vocab Vault and all saved words have been permanently deleted. You can create a fresh one anytime using command `/vocabvault`.")
+        except: pass
+
+    @discord.ui.button(label="No, Cancel", style=discord.ButtonStyle.secondary)
+    async def btn_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.edit_message(content="✅ Deletion cancelled. Your vault is safe.", embed=None, view=None)
+
 # --- 🤖 MAIN BOT CLASS & BACKGROUND TASKS ---
 class NihongoBot(commands.Bot):
     def __init__(self):
@@ -2833,30 +2864,36 @@ async def setup_shadow(interaction: discord.Interaction):
 async def vocab_vault(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     
-    # Check if user has learner role
+    # 🟢 NAYA 1: Strict Channel Restriction Check
+    expected_channel_name = "📸・vocab-vault"
+    if interaction.channel.name != expected_channel_name:
+        vault_channel = discord.utils.get(interaction.guild.channels, name=expected_channel_name)
+        ch_mention = vault_channel.mention if vault_channel else f"#{expected_channel_name}"
+        return await interaction.followup.send(f"❌ This command only runs in this channel {ch_mention}.\n\nPlease click to navigate directly and re-run the command.", ephemeral=True)
+    
+    # 🟢 2. Check if user has learner role
     if not any(r.name in ROLE_NAMES for r in interaction.user.roles):
         return await interaction.followup.send("❌ You need a JLPT Learner role (N5-N1) to unlock the Vocab Vault.", ephemeral=True)
         
     guild = interaction.guild
     
-    # Ensure the main channel exists
+    # Ensure the main category and channel exist
     vault_category = discord.utils.get(guild.categories, name="🧠 SMART LEARNING")
     if not vault_category:
         vault_category = await guild.create_category("🧠 SMART LEARNING")
         
-    # 🟢 UPDATED CHANNEL EMOJI HERE
     main_channel = discord.utils.get(guild.channels, name="📸・vocab-vault")
     if not main_channel:
         main_channel = await guild.create_text_channel(name="📸・vocab-vault", category=vault_category)
 
-    # 🟢 CHECK 1: Does user already have a Vault Thread?
+    # 🟢 3. CHECK IF VAULT ALREADY EXISTS
     thread_name = f"🧵 {interaction.user.name}'s Vault"
     existing_thread = discord.utils.get(main_channel.threads, name=thread_name)
     
     if existing_thread:
         return await interaction.followup.send(f"⚠️ You already have an active Vocab Vault!\n👉 **Jump here:** {existing_thread.mention}\n\n*Just drop your photos inside that thread!*", ephemeral=True)
 
-    # 🟢 CREATE NEW VAULT THREAD
+    # 🟢 4. CREATE NEW VAULT THREAD
     try:
         # Send a dummy message to create a thread under it
         dummy_msg = await main_channel.send(f"Vault created for {interaction.user.mention}.")
@@ -2866,9 +2903,10 @@ async def vocab_vault(interaction: discord.Interaction):
         )
         await dummy_msg.delete() # Clean up the dummy message
         
+        # 🟢 NAYA 2: Added Privacy Disclaimer in Welcome Embed
         embed = discord.Embed(
             title="📸 Welcome to your Visual Memory Vault!", 
-            description="Your personal Japanese Pokédex is ready.\n\n**How to use:**\n1. Take a photo of ANY object in real life.\n2. **Drop/Upload the photo directly into this thread.**\n3. Sensei will automatically scan it and help you memorize it forever!\n\n*(No commands needed. Just send photos!)*", 
+            description="Your personal Japanese Pokédex is ready.\n\n**How to use:**\n1. Take a photo of ANY object in real life.\n2. **Drop/Upload the photo directly into your personal thread not visible to anyone else.**\n3. Sensei will automatically scan it and help you memorize it forever via flashcard quizes!\n\n*(No commands needed. Just send photos!)*\n\n🔒 **`Privacy Disclaimer:** Your images are processed securely and are NEVER stored on our servers except for discord, still please avoid uploading sensitive personal information (IDs, faces, etc).`", 
             color=0x2ecc71
         )
         await thread.send(content=interaction.user.mention, embed=embed)
@@ -2876,5 +2914,29 @@ async def vocab_vault(interaction: discord.Interaction):
         
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to create Vault: {e}", ephemeral=True)
+
+@bot.tree.command(name="deletevault", description="Permanently delete your personal Vocab Vault and all saved words.")
+async def delete_vault(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    main_channel = discord.utils.get(guild.channels, name="📸・vocab-vault")
+    if not main_channel:
+        return await interaction.followup.send("❌ Vault channel not found.", ephemeral=True)
+        
+    thread_name = f"🧵 {interaction.user.name}'s Vault"
+    existing_thread = discord.utils.get(main_channel.threads, name=thread_name)
+    
+    if not existing_thread:
+        return await interaction.followup.send("❌ You don't have an active Vocab Vault to delete.", ephemeral=True)
+        
+    embed = discord.Embed(
+        title="⚠️ Delete Vocab Vault?", 
+        description="Are you sure you want to permanently delete your Visual Memory Vault? This will wipe all your saved words and study progress.\n\n**This action CANNOT be undone.**", 
+        color=discord.Color.red()
+    )
+    
+    view = DeleteVaultView(interaction.user, existing_thread)
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     
 bot.run(os.environ.get("BOT_TOKEN"))
