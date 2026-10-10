@@ -1479,167 +1479,6 @@ class WelcomeView(View):
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ AI Initialization Error: {e}")
 
-# ==========================================
-# 📸 VISUAL MEMORY VAULT (SILENT SCANNER CORE)
-# ==========================================
-async def handle_nsfw_vault(guild, thread, user):
-    log_ch = discord.utils.get(guild.channels, name="admin-logs")
-    if not log_ch: return
-    
-    founder = discord.utils.get(guild.roles, name="Founder（ファウンダ）")
-    sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
-    
-    ping_str = f"{founder.mention if founder else ''} {sr_admin.mention if sr_admin else ''}"
-    embed = discord.Embed(
-        title="🚨 NSFW Upload Detected in Vocab Vault", 
-        description=f"User {user.mention} uploaded an image that triggered Content Safety Filters in their private vault: {thread.mention}.\n\nSenior Admins have been temporarily added to the thread for 24 hours to review the content. Access will be revoked automatically after 24 hours.", 
-        color=0xe74c3c
-    )
-    
-    await log_ch.send(content=ping_str, embed=embed)
-    
-    if sr_admin:
-        for admin_member in sr_admin.members:
-            try: await thread.add_user(admin_member)
-            except: pass
-            
-        async def remove_admin_access():
-            await asyncio.sleep(86400) # Wait exactly 24 hours
-            for admin_member in sr_admin.members:
-                try: await thread.remove_user(admin_member)
-                except: pass
-                
-        bot.loop.create_task(remove_admin_access())
-
-class VaultVocabSelect(Select):
-    def __init__(self, options_data, img_url):
-        self.options_data = options_data
-        self.img_url = img_url
-        
-        select_options = []
-        for idx, opt in enumerate(options_data):
-            label_name = f"{opt.get('kanji', 'Unknown')} - {opt.get('english', 'Unknown')}"
-            select_options.append(discord.SelectOption(label=label_name[:100], value=str(idx), description=f"{opt.get('kana', '')} [{opt.get('jlpt', 'Unknown')}]", emoji="🇯🇵"))
-            
-        super().__init__(placeholder="Select the word to memorize...", min_values=1, max_values=1, options=select_options)
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        selected_vocab = self.options_data[int(self.values[0])]
-        word_kanji = selected_vocab.get('kanji', '')
-        word_kana = selected_vocab.get('kana', '')
-        word_jlpt = selected_vocab.get('jlpt', 'Unknown')
-        
-        # 🟢 SMART JLPT FEEDBACK LOGIC
-        user_roles = [r.name for r in interaction.user.roles if r.name in ROLE_NAMES]
-        user_lvl_short = user_roles[0].split(" ")[1] if user_roles else "N5"
-        
-        level_map = {"N5": 1, "N4": 2, "N3": 3, "N2": 4, "N1": 5, "Rare": 6}
-        u_val = level_map.get(user_lvl_short, 1)
-        w_val = level_map.get(word_jlpt, 6)
-        
-        if w_val == 6:
-            feedback_msg = "Rare catch! This word is outside the standard syllabus. Impressive vocabulary!"
-        elif w_val == u_val:
-            feedback_msg = f"Perfect! This {word_jlpt} word is exactly what you need to focus on right now."
-        elif w_val > u_val:
-            feedback_msg = f"Whoa, ambitious! This is an advanced {word_jlpt} word. It might be challenging, but great for your future!"
-        else:
-            feedback_msg = f"Nice revision! A solid {word_jlpt} word to keep your foundations strong."
-
-        # 🟢 HYPERLINK INJECTOR (Like Dokkai Drop)
-        linked_kanji_display = word_kanji
-        db_kanjis = kanji_db.find({"url": {"$exists": True}})
-        for doc in db_kanjis:
-            k_char = doc.get("kanji_char")
-            k_url = doc.get("url")
-            if k_char and k_char in linked_kanji_display:
-                linked_kanji_display = linked_kanji_display.replace(k_char, f"[{k_char}]({k_url})")
-        
-        # Save to MongoDB
-        next_review = int(time.time()) + 86400 # 24 hours
-        vocab_db.insert_one({
-            "user_id": interaction.user.id,
-            "kanji": word_kanji,
-            "kana": word_kana,
-            "english": selected_vocab.get("english"),
-            "image_url": self.img_url,
-            "level": 1,
-            "next_review": next_review
-        })
-        
-        await interaction.edit_original_response(content=f"✅ **{linked_kanji_display}** ({word_kana}) has been secured in your Level 1 Memory!\n💡 *Sensei says: {feedback_msg}*", embed=None, view=None)
-
-class VaultVocabSelectView(View):
-    def __init__(self, user, options_data, img_url, original_message):
-        super().__init__(timeout=120)
-        self.user = user
-        self.original_message = original_message
-        self.add_item(VaultVocabSelect(options_data, img_url))
-        
-    @discord.ui.button(label="Not what I wanted (Delete Image)", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
-    async def btn_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user.id: return
-        try: await self.original_message.delete()
-        except: pass
-        await interaction.response.edit_message(content="🗑️ Image deleted! Feel free to upload a clearer photo or different angle.", embed=None, view=None)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user.id:
-            await interaction.response.send_message("❌ This is not your photo!", ephemeral=True)
-            return False
-        return True
-
-# 🟢 THE SILENT EVENT LISTENER
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-        
-    if isinstance(message.channel, discord.Thread) and message.channel.parent:
-        if message.channel.parent.name == "📸・vocab-vault" and message.attachments:
-            attachment = message.attachments[0]
-            
-            if attachment.content_type and attachment.content_type.startswith("image/"):
-                thread = message.channel
-                user = message.author
-                
-                if f"{user.name}'s Vault" not in thread.name:
-                    return
-                    
-                temp_msg = await thread.send(f"👀 Sensei is analyzing your photo, {user.mention}...")
-                
-                prompt = """Analyze this image. Identify the 3 most prominent objects, concepts, or actions shown. 
-                Return the results STRICTLY as a JSON array of 3 objects. 
-                Each object must have: 'kanji' (the Japanese word in kanji or kana), 'kana' (hiragana/katakana reading), 'english' (meaning), and 'jlpt' (the approximate JLPT level of this word, strictly one of: "N5", "N4", "N3", "N2", "N1", or "Rare").
-                Do not return anything outside the JSON array.
-                Example: [{"kanji": "車", "kana": "くるま", "english": "Car", "jlpt": "N5"}]"""
-                
-                try:
-                    raw_text = await generate_vision_response(prompt, attachment.url)
-                    vocab_options = extract_json(raw_text)
-                    
-                    if not vocab_options or len(vocab_options) < 1:
-                        raise Exception("Could not extract vocabulary.")
-                        
-                    view = VaultVocabSelectView(user, vocab_options, attachment.url, message)
-                    
-                    embed = discord.Embed(title="👀 Sensei analyzed your photo!", description="What do you want to learn? Choose from the dropdown below:", color=0x3498db)
-                    for idx, v in enumerate(vocab_options):
-                        embed.add_field(name=f"Option {idx+1}", value=f"**{v.get('kanji', '')}** ({v.get('kana', '')}) - [{v.get('jlpt', 'Unknown')}]\n{v.get('english', '')}", inline=False)
-                        
-                    await temp_msg.edit(content=user.mention, embed=embed, view=view)
-                    
-                except Exception as e:
-                    error_str = str(e)
-                    if "NSFW_FLAGGED" in error_str:
-                        await temp_msg.edit(content="⚠️ **Sensei cannot process this image due to safety filters. This incident has been logged. An Admin might contact you.**")
-                        await handle_nsfw_vault(message.guild, thread, user)
-                    else:
-                        await temp_msg.edit(content=f"❌ Failed to analyze image: {error_str}")
-                        
-    await bot.process_commands(message)
-
 # 🗑️ DELETE VOCAB VAULT
 class DeleteVaultView(View):
     def __init__(self, user, thread):
@@ -3101,5 +2940,167 @@ async def delete_vault(interaction: discord.Interaction):
     
     view = DeleteVaultView(interaction.user, existing_thread)
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+# ==========================================
+# 📸 VISUAL MEMORY VAULT (SILENT SCANNER CORE)
+# ==========================================
+async def handle_nsfw_vault(guild, thread, user):
+    log_ch = discord.utils.get(guild.channels, name="admin-logs")
+    if not log_ch: return
+    
+    founder = discord.utils.get(guild.roles, name="Founder（ファウンダ）")
+    sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
+    
+    ping_str = f"{founder.mention if founder else ''} {sr_admin.mention if sr_admin else ''}"
+    embed = discord.Embed(
+        title="🚨 NSFW Upload Detected in Vocab Vault", 
+        description=f"User {user.mention} uploaded an image that triggered Content Safety Filters in their private vault: {thread.mention}.\n\nSenior Admins have been temporarily added to the thread for 24 hours to review the content. Access will be revoked automatically after 24 hours.", 
+        color=0xe74c3c
+    )
+    
+    await log_ch.send(content=ping_str, embed=embed)
+    
+    if sr_admin:
+        for admin_member in sr_admin.members:
+            try: await thread.add_user(admin_member)
+            except: pass
+            
+        async def remove_admin_access():
+            await asyncio.sleep(86400) # Wait exactly 24 hours
+            for admin_member in sr_admin.members:
+                try: await thread.remove_user(admin_member)
+                except: pass
+                
+        bot.loop.create_task(remove_admin_access())
+
+class VaultVocabSelect(Select):
+    def __init__(self, options_data, img_url):
+        self.options_data = options_data
+        self.img_url = img_url
+        
+        select_options = []
+        for idx, opt in enumerate(options_data):
+            label_name = f"{opt.get('kanji', 'Unknown')} - {opt.get('english', 'Unknown')}"
+            select_options.append(discord.SelectOption(label=label_name[:100], value=str(idx), description=f"{opt.get('kana', '')} [{opt.get('jlpt', 'Unknown')}]", emoji="🇯🇵"))
+            
+        super().__init__(placeholder="Select the word to memorize...", min_values=1, max_values=1, options=select_options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        selected_vocab = self.options_data[int(self.values[0])]
+        word_kanji = selected_vocab.get('kanji', '')
+        word_kana = selected_vocab.get('kana', '')
+        word_jlpt = selected_vocab.get('jlpt', 'Unknown')
+        
+        # 🟢 SMART JLPT FEEDBACK LOGIC
+        user_roles = [r.name for r in interaction.user.roles if r.name in ROLE_NAMES]
+        user_lvl_short = user_roles[0].split(" ")[1] if user_roles else "N5"
+        
+        level_map = {"N5": 1, "N4": 2, "N3": 3, "N2": 4, "N1": 5, "Rare": 6}
+        u_val = level_map.get(user_lvl_short, 1)
+        w_val = level_map.get(word_jlpt, 6)
+        
+        if w_val == 6:
+            feedback_msg = "Rare catch! This word is outside the standard syllabus. Impressive vocabulary!"
+        elif w_val == u_val:
+            feedback_msg = f"Perfect! This {word_jlpt} word is exactly what you need to focus on right now."
+        elif w_val > u_val:
+            feedback_msg = f"Whoa, ambitious! This is an advanced {word_jlpt} word. It might be challenging, but great for your future!"
+        else:
+            feedback_msg = f"Nice revision! A solid {word_jlpt} word to keep your foundations strong."
+
+        # 🟢 HYPERLINK INJECTOR (Like Dokkai Drop)
+        linked_kanji_display = word_kanji
+        db_kanjis = kanji_db.find({"url": {"$exists": True}})
+        for doc in db_kanjis:
+            k_char = doc.get("kanji_char")
+            k_url = doc.get("url")
+            if k_char and k_char in linked_kanji_display:
+                linked_kanji_display = linked_kanji_display.replace(k_char, f"[{k_char}]({k_url})")
+        
+        # Save to MongoDB
+        next_review = int(time.time()) + 86400 # 24 hours
+        vocab_db.insert_one({
+            "user_id": interaction.user.id,
+            "kanji": word_kanji,
+            "kana": word_kana,
+            "english": selected_vocab.get("english"),
+            "image_url": self.img_url,
+            "level": 1,
+            "next_review": next_review
+        })
+        
+        await interaction.edit_original_response(content=f"✅ **{linked_kanji_display}** ({word_kana}) has been secured in your Level 1 Memory!\n💡 *Sensei says: {feedback_msg}*", embed=None, view=None)
+
+class VaultVocabSelectView(View):
+    def __init__(self, user, options_data, img_url, original_message):
+        super().__init__(timeout=120)
+        self.user = user
+        self.original_message = original_message
+        self.add_item(VaultVocabSelect(options_data, img_url))
+        
+    @discord.ui.button(label="Not what I wanted (Delete Image)", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
+    async def btn_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        try: await self.original_message.delete()
+        except: pass
+        await interaction.response.edit_message(content="🗑️ Image deleted! Feel free to upload a clearer photo or different angle.", embed=None, view=None)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message("❌ This is not your photo!", ephemeral=True)
+            return False
+        return True
+
+# 🟢 THE SILENT EVENT LISTENER
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+        
+    if isinstance(message.channel, discord.Thread) and message.channel.parent:
+        if message.channel.parent.name == "📸・vocab-vault" and message.attachments:
+            attachment = message.attachments[0]
+            
+            if attachment.content_type and attachment.content_type.startswith("image/"):
+                thread = message.channel
+                user = message.author
+                
+                if f"{user.name}'s Vault" not in thread.name:
+                    return
+                    
+                temp_msg = await thread.send(f"👀 Sensei is analyzing your photo, {user.mention}...")
+                
+                prompt = """Analyze this image. Identify the 3 most prominent objects, concepts, or actions shown. 
+                Return the results STRICTLY as a JSON array of 3 objects. 
+                Each object must have: 'kanji' (the Japanese word in kanji or kana), 'kana' (hiragana/katakana reading), 'english' (meaning), and 'jlpt' (the approximate JLPT level of this word, strictly one of: "N5", "N4", "N3", "N2", "N1", or "Rare").
+                Do not return anything outside the JSON array.
+                Example: [{"kanji": "車", "kana": "くるま", "english": "Car", "jlpt": "N5"}]"""
+                
+                try:
+                    raw_text = await generate_vision_response(prompt, attachment.url)
+                    vocab_options = extract_json(raw_text)
+                    
+                    if not vocab_options or len(vocab_options) < 1:
+                        raise Exception("Could not extract vocabulary.")
+                        
+                    view = VaultVocabSelectView(user, vocab_options, attachment.url, message)
+                    
+                    embed = discord.Embed(title="👀 Sensei analyzed your photo!", description="What do you want to learn? Choose from the dropdown below:", color=0x3498db)
+                    for idx, v in enumerate(vocab_options):
+                        embed.add_field(name=f"Option {idx+1}", value=f"**{v.get('kanji', '')}** ({v.get('kana', '')}) - [{v.get('jlpt', 'Unknown')}]\n{v.get('english', '')}", inline=False)
+                        
+                    await temp_msg.edit(content=user.mention, embed=embed, view=view)
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    if "NSFW_FLAGGED" in error_str:
+                        await temp_msg.edit(content="⚠️ **Sensei cannot process this image due to safety filters. This incident has been logged. An Admin might contact you.**")
+                        await handle_nsfw_vault(message.guild, thread, user)
+                    else:
+                        await temp_msg.edit(content=f"❌ Failed to analyze image: {error_str}")
+                        
+    await bot.process_commands(message)
+
     
 bot.run(os.environ.get("BOT_TOKEN"))
