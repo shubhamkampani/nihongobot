@@ -3173,28 +3173,58 @@ async def on_message(message: discord.Message):
             
             if f"{user.name}'s Vault" not in thread.name:
                 return
+
+            # 🛡️ SMART SANITY CHECK (Language Agnostic)
+            user_text = message.content.strip()
+            
+            # 1. Obvious Trash Filter (Too short, or whole paragraph essay)
+            if len(user_text) < 3 or len(user_text) > 150:
+                return 
                 
-            temp_msg = await thread.send(f"👀 Sensei is analyzing your text, {user.mention}...")
+            # 2. Keyboard Smash Filter (e.g., "hahahaha", "asdasdasd")
+            # Agar pure message mein 3 se kam unique characters hain, toh wo gibberish hai.
+            if len(set(user_text.replace(" ", ""))) < 3:
+                return
+                
+            # 3. Word Count Rule - If message has more than 25 words, consider it as paragraph.
+            if len(user_text.split()) > 25:
+                return
+                
+            temp_msg = await thread.send(f"⏱️ Give me a sec,🎴 making a FLASHCARD, {user.mention}...")
             
             prompt = f"""The user typed: {message.content}
-            Task: Did the user provide a Japanese vocabulary word or phrase (even in romaji, english or hindi)?
-            If it's just conversational noise (example, 'hello', 'how does this work?'), return strictly: {{"is_vocab": false}}
-            If it contains a vocab word (example, 'Oboeru means to remember' or 'Arimasu - to exist'), extract it and return strictly: 
-            {{"is_vocab": true, "kanji": "The proper kanji (if any)", "kana": "The hiragana/katakana reading", "english": "The English meaning", "jlpt": "Approximate JLPT Level (N5-N1 or Rare)"}}
-            Output ONLY valid JSON."""
+            Task: Extract ALL Japanese vocabulary words or phrases provided by the user (even if typed in romaji, english or hindi).
+            If the text is just conversational noise (e.g., 'hello', 'how does this work?'), return strictly an empty array: []
+            If it contains vocab words (e.g., 'Oboeru means to remember' or 'Arimasu - to exist'),and if there is a spelling mistake correct it then extract EACH ONE into a separate object and return an array of objects.
+            Format of each object: {{"kanji": "The proper kanji (if any)", "kana": "The hiragana/katakana reading", "english": "The English meaning", "jlpt": "Approximate JLPT Level (N5-N1 or Rare)"}}
+            Output ONLY a valid JSON array."""
             
             try:
                 raw_text = await generate_gemini_response(prompt)
                 data = extract_json(raw_text)
-                if isinstance(data, list): data = data[0]
                 
-                if not data.get("is_vocab", False):
+                # Ensure data is a list
+                if not isinstance(data, list):
+                    if isinstance(data, dict) and "kanji" in data:
+                        data = [data]
+                    else:
+                        data = []
+                
+                # If no vocab found, delete temp message and ignore
+                if len(data) == 0 or not data[0].get("kanji"):
                     return await temp_msg.delete()
                     
-                word_kanji = data.get("kanji", "")
-                word_kana = data.get("kana", "")
-                word_eng = str(data.get("english", "Unknown"))
-                word_jlpt = data.get("jlpt", "N5")
+                # 🟢 MULTIPLE VOCAB HANDLER
+                if len(data) > 1:
+                    warning_msg = f"⚠️ {user.mention}, I processed the only the first vocab, please enter **1 vocab at a time** to prevent mess and maintain SRS focus.\n\n**Copy your text from here and send the rest one by one:**\n`{message.content}`"
+                    await thread.send(warning_msg, delete_after=45) # Auto deletes in 45 seconds
+                    
+                vocab_item = data[0] # Take only the FIRST word
+                
+                word_kanji = vocab_item.get("kanji", "")
+                word_kana = vocab_item.get("kana", "")
+                word_eng = str(vocab_item.get("english", "Unknown"))
+                word_jlpt = vocab_item.get("jlpt", "N5")
                 
                 # 🟢 THE PREMIUM MESH GRADIENT GENERATOR
                 from PIL import Image, ImageDraw, ImageFilter, ImageFont
