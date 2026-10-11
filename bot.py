@@ -2944,22 +2944,23 @@ async def vocab_vault(interaction: discord.Interaction):
 
     # 🟢 4. CREATE NEW VAULT THREAD
     try:
-        # Send a dummy message to create a thread under it
         dummy_msg = await main_channel.send(f"Vault created for {interaction.user.mention}.")
         thread = await dummy_msg.create_thread(
             name=thread_name, 
-            auto_archive_duration=10080 # 7 days (Prevents it from closing too fast)
+            auto_archive_duration=10080 
         )
-        await dummy_msg.delete() # Clean up the dummy message
+        await dummy_msg.delete() 
         
-        # 🟢 NAYA 2: Added Privacy Disclaimer in Welcome Embed
         embed = discord.Embed(
             title="📸 Welcome to your Visual Memory Vault!", 
-            description="Your personal Japanese Pokédex is ready.\n\n**How to use:**\n1. Take a photo of ANY object in real life.\n2. **Drop/Upload the photo directly into your personal thread not visible to anyone else.**\n3. Sensei will automatically scan it and help you memorize it forever via flashcard quizes!\n\n*(No commands needed. Just send photos!)*\n\n🔒 **`Privacy Disclaimer:** Your images are processed securely and are NEVER stored on our servers except for discord, still please avoid uploading sensitive personal information (IDs, faces, etc).`", 
+            description="Your personal Japanese Pokédex is ready.\n\n**How to use:**\n1. Take a photo of ANY object in real life.\n2. **Drop/Upload the photo directly into your personal thread not visible to anyone else.**\n3. Sensei will automatically scan it and help you memorize it forever via flashcard quizes!\n\n*(No commands needed. Just send photos!)*\n\n:lock: **`Privacy Disclaimer:** Your images are processed securely and are NEVER stored on our servers except for discord, still please avoid uploading sensitive personal information (IDs, faces, etc).`", 
             color=0x2ecc71
         )
         await thread.send(content=interaction.user.mention, embed=embed)
         await interaction.followup.send(f"✅ **Vault Activated!**\n👉 **Click here to enter:** {thread.mention}", ephemeral=True)
+        
+        # 🟢 Public Announcement for everyone to see
+        await main_channel.send(f"🎉 **{interaction.user.display_name}** has successfully created their private **Vocabulary Vault**! You can also type `/vocabvault` to start your vocab learning by proven scientific method **`SRS`**.")
         
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to create Vault: {e}", ephemeral=True)
@@ -3104,7 +3105,22 @@ class VaultVocabSelectView(View):
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
+
+    # 🟢 STRICT MODERATION FOR THE #vocab-vault CHANNEL
+    if not isinstance(message.channel, discord.Thread) and message.channel.name == "📸・vocab-vault":
+        # Delete user's text message silently
+        try: await message.delete()
+        except: pass
         
+        # Find the ticket channel to ping it dynamically
+        ticket_ch = discord.utils.get(message.guild.channels, name="🎫・create-a-ticket")
+        ticket_mention = ticket_ch.mention if ticket_ch else "#🎫・create-a-ticket"
+        
+        # Send a warning message that auto-deletes after 10 seconds
+        await message.channel.send(f"⚠️ {message.author.mention}, you can only use the `/vocabvault` command here.\nAny queries please click here -> {ticket_mention} and an admin will answer them ASAP.", delete_after=10)
+        return # Stop processing, don't run commands for this message
+        
+    # 🟢 SILENT PHOTO SCANNER (For 📸・vocab-vault threads)    
     if isinstance(message.channel, discord.Thread) and message.channel.parent:
         if message.channel.parent.name == "📸・vocab-vault" and message.attachments:
             attachment = message.attachments[0]
