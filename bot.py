@@ -3162,6 +3162,114 @@ async def on_message(message: discord.Message):
                         await handle_nsfw_vault(message.guild, thread, user)
                     else:
                         await temp_msg.edit(content=f"❌ Failed to analyze image: {error_str}")
+
+    # ---------------------------------------------------------
+# 🟢 TEXT TO FLASHCARD (AI Text Vocab Analyzer & Image Generator)
+# ---------------------------------------------------------
+    if isinstance(message.channel, discord.Thread) and message.channel.parent:
+        if message.channel.parent.name == "📸・vocab-vault" and not message.attachments:
+            thread = message.channel
+            user = message.author
+            
+            if f"{user.name}'s Vault" not in thread.name:
+                return
+                
+            temp_msg = await thread.send(f"👀 Sensei is analyzing your text, {user.mention}...")
+            
+            prompt = f"""The user typed: "{message.content}"
+            Task: Did the user provide a Japanese vocabulary word or phrase (even in romaji, english or hindi)?
+            If its just conversational noise (e.g., 'hello', 'how does this work?'), return strictly: {{"is_vocab": false}}
+            If it contains a vocab word (e.g., 'Oboeru means to remember' or 'Arimasu - to exist'), extract it and return strictly: 
+            {{"is_vocab": true, "kanji": "The proper kanji (if any)", "kana": "The hiragana/katakana reading", "english": "The English meaning", "jlpt": "Approximate JLPT Level (N5-N1 or Rare)"}}
+            Output ONLY valid JSON."""
+            
+            try:
+                raw_text = await generate_gemini_response(prompt)
+                data = extract_json(raw_text)
+                if isinstance(data, list): data = data[0]
+                
+                if not data.get("is_vocab", False):
+                    # It's just noise, ignore and delete temp message
+                    return await temp_msg.delete()
+                    
+                word_kanji = data.get("kanji", "")
+                word_kana = data.get("kana", "")
+                word_eng = data.get("english", "Unknown")
+                word_jlpt = data.get("jlpt", "N5")
+                
+                # 🟢 THE PREMIUM MESH GRADIENT GENERATOR
+                from PIL import Image, ImageDraw, ImageFilter, ImageFont
+                import random, io
+                
+                size = 600
+                img = Image.new('RGB', (size, size), color=(15, 15, 20))
+                draw = ImageDraw.Draw(img)
+                
+                # Premium Color Palettes (Neon/Aurora vibes)
+                palettes = [
+                    [(255, 0, 128), (0, 255, 255), (128, 0, 255)], # Cyberpunk
+                    [(255, 128, 0), (255, 0, 128), (255, 200, 0)], # Sunset
+                    [(0, 255, 128), (0, 128, 255), (0, 255, 255)], # Ocean
+                    [(147, 51, 234), (236, 72, 153), (245, 158, 11)] # Royal Aurora
+                ]
+                card_colors = random.choice(palettes)
+                
+                # Draw random massive blobs
+                for color in card_colors:
+                    x, y = random.randint(0, size), random.randint(0, size)
+                    r = random.randint(200, 400)
+                    draw.ellipse([x-r, y-r, x+r, y+r], fill=color)
+                    
+                # Melt them into a smooth mesh gradient
+                img = img.filter(ImageFilter.GaussianBlur(radius=120))
+                
+                # Dark Glassmorphism Overlay for Text Readability
+                overlay = Image.new('RGBA', img.size, (0, 0, 0, 140))
+                img = img.convert('RGBA')
+                img = Image.alpha_composite(img, overlay)
+                draw = ImageDraw.Draw(img)
+                
+                # 🟢 BOLD CAPS TEXT (Centered)
+                display_text = word_eng.upper()
+                
+                try:
+                    font = ImageFont.truetype("arialbd.ttf", 60) # Bold Font
+                except:
+                    font = ImageFont.load_default()
+                
+                # Center text math
+                text_bbox = draw.textbbox((0, 0), display_text, font=font)
+                text_w = text_bbox[2] - text_bbox[0]
+                text_h = text_bbox[3] - text_bbox[1]
+                draw.text(((size - text_w) / 2, (size - text_h) / 2), display_text, font=font, fill=(255, 255, 255, 255))
+                
+                # Export to Bytes
+                arr = io.BytesIO()
+                img.save(arr, format='PNG')
+                arr.seek(0)
+                file = discord.File(arr, filename="flashcard.png")
+                
+                # 🟢 SEND UI TO USER
+                embed = discord.Embed(
+                    title="👀 Sensei extracted a new word!", 
+                    description=f"Sensei decoded your text into:\n**{word_kanji}** ({word_kana}) - *{word_eng}* [{word_jlpt}]\n\nDo you want to save this premium flashcard to your Vault?", 
+                    color=0x3498db
+                )
+                embed.set_image(url="attachment://flashcard.png")
+                
+                # Setup UI buttons similar to photo scanner
+                vocab_options = [{"kanji": word_kanji, "kana": word_kana, "english": word_eng, "jlpt": word_jlpt}]
+                view = VaultVocabSelectView(user, vocab_options, "attachment://flashcard.png", message)
+                
+                await temp_msg.delete()
+                # Sending the generated file!
+                bot_msg = await thread.send(content=user.mention, embed=embed, file=file, view=view)
+                
+                # 🟢 UPDATE IMAGE URL TO THE DISCORD CDN ONE SO IT SAVES CORRECTLY IN DB
+                view.children[0].img_url = bot_msg.embeds[0].image.url
+                
+            except Exception as e:
+                await temp_msg.edit(content=f"❌ Failed to analyze text: {e}")
                         
     await bot.process_commands(message)
 
