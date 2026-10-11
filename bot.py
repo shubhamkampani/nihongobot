@@ -3229,25 +3229,40 @@ async def on_message(message: discord.Message):
                 img = Image.alpha_composite(img, overlay)
                 draw = ImageDraw.Draw(img)
                 
-                # 🟢 BOLD CAPS TEXT (Centered)
+                # 🟢 DYNAMIC PIXEL FONT & SMART WRAPPING
+                import textwrap
+                
                 display_text = word_eng.upper()
+                max_width = size - 80 # Leave nice padding on sides
+                font_size = 80 # Start HUGE
                 
-                try:
-                    font = ImageFont.truetype("arialbd.ttf", 60) # Bold Font
-                except:
-                    font = ImageFont.load_default()
-                
-                # Center text math
-                text_bbox = draw.textbbox((0, 0), display_text, font=font)
-                text_w = text_bbox[2] - text_bbox[0]
-                text_h = text_bbox[3] - text_bbox[1]
-                draw.text(((size - text_w) / 2, (size - text_h) / 2), display_text, font=font, fill=(255, 255, 255, 255))
-                
-                # Export to Bytes
-                arr = io.BytesIO()
-                img.save(arr, format='PNG')
-                arr.seek(0)
-                file = discord.File(arr, filename="flashcard.png")
+                while font_size > 20:
+                    try:
+                        font = ImageFont.truetype("pixel.ttf", font_size)
+                    except:
+                        font = ImageFont.load_default()
+                        break
+                        
+                    # Smartly calculate how many characters can fit on one line
+                    char_width_estimate = font_size * 0.6
+                    chars_per_line = max(int(max_width / char_width_estimate), 10)
+                    
+                    wrapped_lines = textwrap.wrap(display_text, width=chars_per_line)
+                    wrapped_text = "\n".join(wrapped_lines)
+                    
+                    # Calculate size of the entire multiline text block
+                    text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
+                    text_w = text_bbox[2] - text_bbox[0]
+                    text_h = text_bbox[3] - text_bbox[1]
+                    
+                    # If it fits perfectly inside the canvas, break and draw!
+                    if text_w <= max_width and text_h <= (size - 80):
+                        break
+                    
+                    # Otherwise, reduce font size slightly and try again
+                    font_size -= 4
+                    
+                draw.multiline_text(((size - text_w) / 2, (size - text_h) / 2), wrapped_text, font=font, fill=(255, 255, 255, 255), align="center")
                 
                 # 🟢 SEND UI TO USER
                 embed = discord.Embed(
