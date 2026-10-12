@@ -3101,7 +3101,6 @@ class VaultVocabSelectView(View):
         try:
             await interaction.message.delete()
         except: pass
-        await interaction.response.edit_message(content="🗑️ Image/Flashcard deleted! Feel free to upload a clearer photo or different angle or enter the exact vocab from jisho.", embed=None, view=None)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user.id:
