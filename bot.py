@@ -1732,7 +1732,7 @@ class NihongoBot(commands.Bot):
                 
                 embed = discord.Embed(
                     title="🔔 Daily Review Time!", 
-                    description=f"Sensei is here! You have **{len(words)}** visual flashcards due for review today.\n\nKeep your streak alive to move words into your long-term memory (Level 5).", 
+                    description=f"Sensei is here! You have **{len(words)}** visual flashcards due for review today.\n\nKeep your streak alive to move words into your long-term memory (Level 5).\n*Note: This is a self-practice SRS quiz, your scores here will not be added to `/quiz` leaderboard!)*", 
                     color=0xf1c40f
                 )
                 view = StartReviewView(user, words)
