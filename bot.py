@@ -3078,7 +3078,7 @@ class VaultVocabSelect(Select):
             "next_review": next_review
         })
         
-        await interaction.edit_original_response(content=f"✅ **{linked_kanji_display}** ({word_kana}) has been secured in your Level 1 Memory!\n💡 *Sensei says: {feedback_msg}*", embed=None, view=None)
+        await interaction.edit_original_response(content=f"✅ **{linked_kanji_display}** ({word_kana}) has been secured in your Level 1 Memory!\n💡 *Sensei says: {feedback_msg}* I'll ping you for flashcard quiz after sometime.", embed=None, view=None)
 
 class VaultVocabSelectView(View):
     def __init__(self, user, options_data, img_url, original_message):
@@ -3090,9 +3090,18 @@ class VaultVocabSelectView(View):
     @discord.ui.button(label="Not what I wanted (Delete Image)", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
     async def btn_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user.id: return
-        try: await self.original_message.delete()
+        
+        # Acknowledge the button click quietly
+        await interaction.response.defer() 
+        # 1. Deleting user's message
+        try: 
+            await self.original_message.delete()
         except: pass
-        await interaction.response.edit_message(content="🗑️ Image deleted! Feel free to upload a clearer photo or different angle.", embed=None, view=None)
+        # 2. Deleting bot's flashcard from chat
+        try:
+            await interaction.message.delete()
+        except: pass
+        await interaction.response.edit_message(content="🗑️ Image/Flashcard deleted! Feel free to upload a clearer photo or different angle or enter the exact vocab from jisho.", embed=None, view=None)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user.id:
@@ -3254,30 +3263,39 @@ async def on_message(message: discord.Message):
                 img = Image.alpha_composite(img, overlay)
                 draw = ImageDraw.Draw(img)
                 
-                # 🟢 DYNAMIC PIXEL FONT & SMART WRAPPING
+                # 🟢 PIXEL FONT & SMART TEXT WRAPPING
                 display_text = word_eng.upper()
                 max_width = size - 80 
-                font_size = 80 
+                font_size = 75 # Small start for safety (earlier 80)
                 
-                while font_size > 20:
+                while font_size > 15:
                     try: font = ImageFont.truetype("pixel.ttf", font_size)
-                    except: 
-                        font = ImageFont.load_default()
-                        break
+                    except: font = ImageFont.load_default(); break
                         
-                    char_width_estimate = font_size * 0.6
-                    chars_per_line = max(int(max_width / char_width_estimate), 10)
+                    # Pixel fonts are wide, used 0.75 multiplier
+                    char_width_estimate = font_size * 0.75 
+                    chars_per_line = max(int(max_width / char_width_estimate), 8)
                     
-                    wrapped_lines = textwrap.wrap(display_text, width=chars_per_line)
+                    # break_long_words=True ensures long words to get wrapped
+                    wrapped_lines = textwrap.wrap(display_text, width=chars_per_line, break_long_words=True)
                     wrapped_text = "\n".join(wrapped_lines)
                     
-                    text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
-                    text_w = text_bbox[2] - text_bbox[0]
-                    text_h = text_bbox[3] - text_bbox[1]
+                    # Line-by-line width calculation (most accurate for custom fonts)
+                    max_line_width = 0
+                    for line in wrapped_lines:
+                        lw = draw.textlength(line, font=font)
+                        if lw > max_line_width: 
+                            max_line_width = lw
+                            
+                    # Approx height calculation
+                    text_h = len(wrapped_lines) * (font_size * 1.3)
                     
-                    if text_w <= max_width and text_h <= (size - 80):
+                    # Check if total width & height fit or don't
+                    if max_line_width <= max_width and text_h <= (size - 80):
+                        text_w = max_line_width
                         break
-                    font_size -= 4
+                        
+                    font_size -= 4 # If doesn't fit, retry with smaller text size
                     
                 draw.multiline_text(((size - text_w) / 2, (size - text_h) / 2), wrapped_text, font=font, fill=(255, 255, 255, 255), align="center")
                 
