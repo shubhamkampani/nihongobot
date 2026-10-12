@@ -3108,6 +3108,144 @@ class VaultVocabSelectView(View):
             return False
         return True
 
+# ==========================================
+# 🟢 HELPER: PREMIUM FLASHCARD GENERATOR
+# ==========================================
+async def generate_flashcard_bytes(word_eng):
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+    import random, io, textwrap
+    
+    size = 600
+    img = Image.new('RGB', (size, size), color=(15, 15, 20))
+    draw = ImageDraw.Draw(img)
+    
+    palettes = [
+        [(255, 0, 128), (0, 255, 255), (128, 0, 255)], [(255, 128, 0), (255, 0, 128), (255, 200, 0)],
+        [(0, 255, 128), (0, 128, 255), (0, 255, 255)], [(147, 51, 234), (236, 72, 153), (245, 158, 11)]
+    ]
+    card_colors = random.choice(palettes)
+    
+    for color in card_colors:
+        x, y = random.randint(0, size), random.randint(0, size)
+        r = random.randint(200, 400)
+        draw.ellipse([x-r, y-r, x+r, y+r], fill=color)
+        
+    img = img.filter(ImageFilter.GaussianBlur(radius=120))
+    overlay = Image.new('RGBA', img.size, (0, 0, 0, 140))
+    img = img.convert('RGBA')
+    img = Image.alpha_composite(img, overlay)
+    draw = ImageDraw.Draw(img)
+    
+    display_text = word_eng.upper()
+    max_width, font_size = size - 80, 75
+    
+    while font_size > 15:
+        try: font = ImageFont.truetype("pixel.ttf", font_size)
+        except: font = ImageFont.load_default(); break
+            
+        char_width_estimate = font_size * 0.75 
+        chars_per_line = max(int(max_width / char_width_estimate), 8)
+        wrapped_lines = textwrap.wrap(display_text, width=chars_per_line, break_long_words=True)
+        wrapped_text = "\n".join(wrapped_lines)
+        
+        max_line_width = 0
+        for line in wrapped_lines:
+            lw = draw.textlength(line, font=font)
+            if lw > max_line_width: max_line_width = lw
+                
+        text_h = len(wrapped_lines) * (font_size * 1.3)
+        if max_line_width <= max_width and text_h <= (size - 80):
+            text_w = max_line_width
+            break
+        font_size -= 4
+        
+    draw.multiline_text(((size - text_w) / 2, (size - text_h) / 2), wrapped_text, font=font, fill=(255, 255, 255, 255), align="center")
+    arr = io.BytesIO()
+    img.save(arr, format='PNG')
+    arr.seek(0)
+    return arr
+
+class BulkVocabSelect(Select):
+    def __init__(self, options_data, original_message):
+        self.options_data = options_data
+        self.original_message = original_message
+        
+        select_options = []
+        for idx, opt in enumerate(options_data):
+            label_name = f"{opt.get('kanji', 'Unknown')} - {opt.get('english', 'Unknown')}"
+            select_options.append(discord.SelectOption(label=label_name[:100], value=str(idx), description=f"{opt.get('kana', '')} [{opt.get('jlpt', 'Unknown')}]", emoji="🎌"))
+            
+        # User can select multiple options!
+        super().__init__(placeholder="Select correct words to save...", min_values=1, max_values=len(options_data), options=select_options)
+
+    async def callback(self, interaction: discord.Interaction):
+        import time
+        await interaction.response.defer()
+        
+        try: await self.original_message.delete()
+        except: pass
+        
+        await interaction.edit_original_response(content="⏳ **Generating premium flashcards and saving... Please wait!**", embed=None, view=None)
+        
+        files = []
+        embeds = []
+        
+        for i, val in enumerate(self.values):
+            vocab_item = self.options_data[int(val)]
+            word_eng = str(vocab_item.get("english", "Unknown"))
+            
+            arr = await generate_flashcard_bytes(word_eng)
+            filename = f"flashcard_{i}.png"
+            file = discord.File(arr, filename=filename)
+            files.append(file)
+            
+            embed = discord.Embed(color=0x3498db)
+            embed.set_image(url=f"attachment://{filename}")
+            embed.set_footer(text=f"{vocab_item.get('kanji')} ({vocab_item.get('kana')}) - {vocab_item.get('jlpt')}")
+            embeds.append(embed)
+            
+        # Send one single message with ALL generated flashcards attached!
+        msg = await interaction.channel.send(files=files, embeds=embeds)
+        
+        # Save to DB using the generated Discord URLs
+        for i, val in enumerate(self.values):
+            vocab_item = self.options_data[int(val)]
+            img_url = msg.embeds[i].image.url
+            
+            vocab_db.insert_one({
+                "user_id": interaction.user.id,
+                "kanji": vocab_item.get("kanji", ""),
+                "kana": vocab_item.get("kana", ""),
+                "english": vocab_item.get("english", ""),
+                "image_url": img_url,
+                "level": 1,
+                "next_review": int(time.time()) + 86400
+            })
+            
+        await interaction.edit_original_response(content=f"✅ **{len(self.values)} Flashcards successfully generated and saved to your Vault! I will ping you for SRS quiz eventually.**", embed=None, view=None)
+
+class BulkVocabSelectView(View):
+    def __init__(self, user, options_data, original_message):
+        super().__init__(timeout=120)
+        self.user = user
+        self.original_message = original_message
+        self.add_item(BulkVocabSelect(options_data, original_message))
+        
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id: return
+        await interaction.response.defer()
+        try: await self.original_message.delete()
+        except: pass
+        try: await interaction.message.delete()
+        except: pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message("❌ This is not your session!", ephemeral=True)
+            return False
+        return True
+
 # 🟢 THE SILENT EVENT LISTENER
 @bot.event
 async def on_message(message: discord.Message):
@@ -3182,28 +3320,17 @@ async def on_message(message: discord.Message):
             if f"{user.name}'s Vault" not in thread.name:
                 return
 
-            # 🛡️ SMART SANITY CHECK (Language Agnostic)
             user_text = message.content.strip()
-            
-            # 1. Obvious Trash Filter (Too short, or whole paragraph essay)
-            if len(user_text) < 3 or len(user_text) > 150:
-                return 
+            if len(user_text) < 3 or len(user_text) > 150: return 
+            if len(set(user_text.replace(" ", ""))) < 3: return
+            if len(user_text.split()) > 25: return
                 
-            # 2. Keyboard Smash Filter (e.g., "hahahaha", "asdasdasd")
-            # Agar pure message mein 3 se kam unique characters hain, toh wo gibberish hai.
-            if len(set(user_text.replace(" ", ""))) < 3:
-                return
-                
-            # 3. Word Count Rule - If message has more than 25 words, consider it as paragraph.
-            if len(user_text.split()) > 25:
-                return
-                
-            temp_msg = await thread.send(f"⏱️ Give me a sec,🎴 making a FLASHCARD, {user.mention}...")
+            temp_msg = await thread.send(f"⏱️ Give me a sec, 🎴 analyzing your words, {user.mention}...")
             
             prompt = f"""The user typed: {message.content}
             Task: Extract ALL Japanese vocabulary words or phrases provided by the user (even if typed in romaji, english or hindi).
             If the text is just conversational noise (e.g., 'hello', 'how does this work?'), return strictly an empty array: []
-            If it contains vocab words (e.g., 'Oboeru means to remember' or 'Arimasu - to exist'),and if there is a spelling mistake correct it then extract EACH ONE into a separate object and return an array of objects.
+            If it contains vocab words (e.g., 'Oboeru means to remember' or 'Arimasu - to exist'), and if there is a spelling mistake correct it then extract EACH ONE into a separate object and return an array of objects.
             Format of each object: {{"kanji": "The proper kanji (if any)", "kana": "The hiragana/katakana reading", "english": "The English meaning", "jlpt": "Approximate JLPT Level (N5-N1 or Rare)"}}
             Output ONLY a valid JSON array."""
             
@@ -3211,100 +3338,47 @@ async def on_message(message: discord.Message):
                 raw_text = await generate_gemini_response(prompt)
                 data = extract_json(raw_text)
                 
-                # Ensure data is a list
                 if not isinstance(data, list):
-                    if isinstance(data, dict) and "kanji" in data:
-                        data = [data]
-                    else:
-                        data = []
+                    if isinstance(data, dict) and "kanji" in data: data = [data]
+                    else: data = []
                 
-                # If no vocab found, delete temp message and ignore
                 if len(data) == 0 or not data[0].get("kanji"):
                     return await temp_msg.delete()
                     
-                # 🟢 MULTIPLE VOCAB HANDLER
+                # 🟢 THE HYBRID LOGIC
                 if len(data) > 1:
-                    warning_msg = f"⚠️ {user.mention}, I processed the only the first vocab, please enter **1 vocab at a time** to prevent mess and maintain SRS focus.\n\n**Copy your text from here and send the rest one by one:**\n`{message.content}`"
-                    await thread.send(warning_msg, delete_after=45) # Auto deletes in 45 seconds
+                    # SCENARIO B: BULK ADD (2 to 5+ words)
+                    extra_words_flag = False
+                    if len(data) > 5:
+                        data = data[:5] # ✂️ CUT TO MAX 5 (Hard Cap)
+                        extra_words_flag = True
+                        
+                    warn_text = "\n\n⚠️ *Sensei noticed you sent a lot of words! To maintain focus, only the first 5 words have been extracted.*" if extra_words_flag else ""
                     
-                vocab_item = data[0] # Take only the FIRST word
-                
+                    embed = discord.Embed(
+                        title="👀 Bulk Vocab Detected!", 
+                        description=f"Sensei extracted multiple words! Please select the correct ones from the dropdown below to generate flashcards.{warn_text}", 
+                        color=0x3498db
+                    )
+                    
+                    for idx, v in enumerate(data):
+                        embed.add_field(name=f"Option {idx+1}", value=f"**{v.get('kanji', '')}** ({v.get('kana', '')}) - {v.get('english', '')}", inline=False)
+                        
+                    view = BulkVocabSelectView(user, data, message)
+                    await temp_msg.edit(content=user.mention, embed=embed, view=view)
+                    return # End here. Let the Dropdown take over!
+                    
+                # SCENARIO A: SINGLE WORD (Classic Flow)
+                vocab_item = data[0]
                 word_kanji = vocab_item.get("kanji", "")
                 word_kana = vocab_item.get("kana", "")
                 word_eng = str(vocab_item.get("english", "Unknown"))
                 word_jlpt = vocab_item.get("jlpt", "N5")
                 
-                # 🟢 THE PREMIUM MESH GRADIENT GENERATOR
-                from PIL import Image, ImageDraw, ImageFilter, ImageFont
-                import random, io, textwrap
-                
-                size = 600
-                img = Image.new('RGB', (size, size), color=(15, 15, 20))
-                draw = ImageDraw.Draw(img)
-                
-                palettes = [
-                    [(255, 0, 128), (0, 255, 255), (128, 0, 255)], # Cyberpunk
-                    [(255, 128, 0), (255, 0, 128), (255, 200, 0)], # Sunset
-                    [(0, 255, 128), (0, 128, 255), (0, 255, 255)], # Ocean
-                    [(147, 51, 234), (236, 72, 153), (245, 158, 11)] # Royal Aurora
-                ]
-                card_colors = random.choice(palettes)
-                
-                for color in card_colors:
-                    x, y = random.randint(0, size), random.randint(0, size)
-                    r = random.randint(200, 400)
-                    draw.ellipse([x-r, y-r, x+r, y+r], fill=color)
-                    
-                img = img.filter(ImageFilter.GaussianBlur(radius=120))
-                
-                overlay = Image.new('RGBA', img.size, (0, 0, 0, 140))
-                img = img.convert('RGBA')
-                img = Image.alpha_composite(img, overlay)
-                draw = ImageDraw.Draw(img)
-                
-                # 🟢 PIXEL FONT & SMART TEXT WRAPPING
-                display_text = word_eng.upper()
-                max_width = size - 80 
-                font_size = 75 # Small start for safety (earlier 80)
-                
-                while font_size > 15:
-                    try: font = ImageFont.truetype("pixel.ttf", font_size)
-                    except: font = ImageFont.load_default(); break
-                        
-                    # Pixel fonts are wide, used 0.75 multiplier
-                    char_width_estimate = font_size * 0.75 
-                    chars_per_line = max(int(max_width / char_width_estimate), 8)
-                    
-                    # break_long_words=True ensures long words to get wrapped
-                    wrapped_lines = textwrap.wrap(display_text, width=chars_per_line, break_long_words=True)
-                    wrapped_text = "\n".join(wrapped_lines)
-                    
-                    # Line-by-line width calculation (most accurate for custom fonts)
-                    max_line_width = 0
-                    for line in wrapped_lines:
-                        lw = draw.textlength(line, font=font)
-                        if lw > max_line_width: 
-                            max_line_width = lw
-                            
-                    # Approx height calculation
-                    text_h = len(wrapped_lines) * (font_size * 1.3)
-                    
-                    # Check if total width & height fit or don't
-                    if max_line_width <= max_width and text_h <= (size - 80):
-                        text_w = max_line_width
-                        break
-                        
-                    font_size -= 4 # If doesn't fit, retry with smaller text size
-                    
-                draw.multiline_text(((size - text_w) / 2, (size - text_h) / 2), wrapped_text, font=font, fill=(255, 255, 255, 255), align="center")
-                
-                # 🟢 EXPORT TO BYTES
-                arr = io.BytesIO()
-                img.save(arr, format='PNG')
-                arr.seek(0)
+                # 🟢 CALLING HELPER FUNCTION line 3112
+                arr = await generate_flashcard_bytes(word_eng)
                 file = discord.File(arr, filename="flashcard.png")
                 
-                # 🟢 SEND UI TO USER
                 embed = discord.Embed(
                     title="👀 Sensei extracted a new word!", 
                     description=f"Sensei decoded your text into:\n**{word_kanji}** ({word_kana}) - *{word_eng}* [{word_jlpt}]\n\nDo you want to save this flashcard to your Vocab-Vault?", 
@@ -3317,12 +3391,9 @@ async def on_message(message: discord.Message):
                 
                 await temp_msg.delete()
                 bot_msg = await thread.send(content=user.mention, embed=embed, file=file, view=view)
-                
-                # Update image url
                 view.children[0].img_url = bot_msg.embeds[0].image.url
                 
             except Exception as e:
-                # 🟢 BULLETPROOF ERROR HANDLING
                 try: await temp_msg.edit(content=f"❌ Failed to analyze text: {e}")
                 except: await thread.send(content=f"❌ Failed to analyze text: {e}")
                         
