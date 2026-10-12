@@ -3321,9 +3321,9 @@ async def on_message(message: discord.Message):
                 return
 
             user_text = message.content.strip()
-            if len(user_text) < 3 or len(user_text) > 150: return 
+            if len(user_text) < 3 or len(user_text) > 500: return 
             if len(set(user_text.replace(" ", ""))) < 3: return
-            if len(user_text.split()) > 25: return
+            if len(user_text.split()) > 100: return
                 
             temp_msg = await thread.send(f"⏱️ Give me a sec, 🎴 analyzing your words, {user.mention}...")
             
