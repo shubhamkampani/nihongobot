@@ -3522,5 +3522,72 @@ class StartReviewView(View):
         embed.set_image(url=word['image_url'])
         
         await interaction.message.edit(embed=embed, view=new_view)
+@bot.tree.command(name="healvault", description="[Admin Only] Auto-regenerate and fix broken old flashcard links in DB.")
+async def heal_vault(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     
+    # 1. Admin Check
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied. Only Admins can run the DB healer.", ephemeral=True)
+        
+    # 2. Database mein se saare broken links dhoondho
+    broken_records = list(vocab_db.find({"image_url": {"$regex": "^attachment://"}}))
+    
+    if not broken_records:
+        return await interaction.followup.send("✅ No broken flashcards found! Your database is completely healthy.", ephemeral=True)
+        
+    # 🟢 NEW: Exact Thread Targeting with Archive-Safety
+    vault_channel = discord.utils.get(interaction.guild.channels, name="📸・vocab-vault")
+    target_thread = None
+    exact_thread_name = "🧵 .autonox's Vault" # Tune jo exact naam diya wahi hardcode kiya hai
+    
+    if vault_channel:
+        # Pehle active threads mein dhoondho
+        target_thread = discord.utils.get(vault_channel.threads, name=exact_thread_name)
+        
+        # Agar active mein nahi mila, toh archived threads mein dhoondho aur zinda karo
+        if not target_thread:
+            async for thread in vault_channel.archived_threads(limit=50):
+                if thread.name == exact_thread_name:
+                    target_thread = thread
+                    await target_thread.edit(archived=False) # Un-archive kar do
+                    break
+                    
+    # Fallback: Agar kisi bhi wajah se thread na mile toh wahi bhej do jahan command chalai hai
+    if not target_thread:
+        target_thread = interaction.channel
+        
+    await interaction.followup.send(f"🛠️ Found **{len(broken_records)}** broken flashcards. Starting auto-heal process in {target_thread.mention}... This might take some time.", ephemeral=True)
+    
+    fixed_count = 0
+    await target_thread.send("🚨 **STARTING VOCAB VAULT AUTO-HEAL SCRIPT** 🚨\n*Please do not delete the images generated below, they are hosting the CDN links for the database.*")
+        
+    # 3. Har broken word ke liye nayi image banakar update karo
+    import asyncio
+    for record in broken_records:
+        try:
+            word_eng = record.get("english", "Unknown")
+            doc_id = record.get("_id")
+            
+            # Nayi Premium Image banao (Tere naye helper function se)
+            arr = await generate_flashcard_bytes(word_eng)
+            file = discord.File(arr, filename=f"healed_{fixed_count}.png")
+            
+            # Tere personal Vault mein upload karo
+            msg = await target_thread.send(content=f"🛠️ Healing image for: `{word_eng}`", file=file)
+            new_url = msg.attachments[0].url
+            
+            # Database update karo
+            vocab_db.update_one({"_id": doc_id}, {"$set": {"image_url": new_url}})
+            fixed_count += 1
+            
+            # Discord rate-limit se bachne ke liye 1.5 second delay
+            await asyncio.sleep(1.5)
+            
+        except Exception as e:
+            print(f"Failed to heal {word_eng}: {e}")
+            
+    await target_thread.send(f"✅ **Auto-Heal Complete!** Successfully regenerated and fixed {fixed_count} old flashcards in your personal vault.")
+
 bot.run(os.environ.get("BOT_TOKEN"))
