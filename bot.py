@@ -3210,7 +3210,8 @@ class BulkVocabSelect(Select):
         # Save to DB using the generated Discord URLs
         for i, val in enumerate(self.values):
             vocab_item = self.options_data[int(val)]
-            img_url = msg.embeds[i].image.url
+            # 🟢 Grab direct permanent CDN URL from flashcard/attachments, not embed!
+            img_url = msg.attachments[i].url
             
             vocab_db.insert_one({
                 "user_id": interaction.user.id,
@@ -3391,7 +3392,8 @@ async def on_message(message: discord.Message):
                 
                 await temp_msg.delete()
                 bot_msg = await thread.send(content=user.mention, embed=embed, file=file, view=view)
-                view.children[0].img_url = bot_msg.embeds[0].image.url
+                # 🟢 Grab direct permanent CDN URL from flashcard/attachments, not embed!
+                view.children[0].img_url = bot_msg.attachments[0].url
                 
             except Exception as e:
                 try: await temp_msg.edit(content=f"❌ Failed to analyze text: {e}")
