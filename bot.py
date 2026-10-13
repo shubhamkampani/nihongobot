@@ -1784,9 +1784,6 @@ class NihongoBot(commands.Bot):
                     current_index = 0
                     new_kanjis = kanji_list[current_index : current_index + drop_count]
 
-                next_index = current_index + len(new_kanjis)
-                kanji_db.update_one({"level": lvl_name}, {"$set": {"current_index": next_index}}, upsert=True)
-
                 kanji_str = ", ".join(new_kanjis)
                 prompt = f"""You are an expert Japanese Sensei who cleared N1 within 2 years by smart-work and not hard-work. Explain ALL of the following {len(new_kanjis)} Kanji(s): {kanji_str}.
                 For EACH Kanji, strictly provide:
@@ -1812,12 +1809,17 @@ class NihongoBot(commands.Bot):
                     view = PersistentDailyKanjiView()
                     msg = await channel.send(embed=embed, view=view)
                     
-                    # 🟢 NAYA: Save Message Hyperlink to DB for Dokkai linking!
+                    # 🟢 Save Message Hyperlink to DB for Dokkai linking!
                     for k in new_kanjis:
                         kanji_db.update_one({"kanji_char": k}, {"$set": {"url": msg.jump_url, "level": lvl_name}}, upsert=True)
 
+                    # 🟢 DB is ONLY updated if the message is actually generated and sent successfully!
+                    next_index = current_index + len(new_kanjis)
+                    kanji_db.update_one({"level": lvl_name}, {"$set": {"current_index": next_index}}, upsert=True)
+
                 except Exception as e:
                     print(f"❌ Error dropping {lvl_name} Kanji: {e}")
+                
                 await asyncio.sleep(5)
 
     @tasks.loop(minutes=1)
@@ -3522,5 +3524,93 @@ class StartReviewView(View):
         embed.set_image(url=word['image_url'])
         
         await interaction.message.edit(embed=embed, view=new_view)
+
+@bot.tree.command(name="dropkanji", description="[Admin Only] Manually trigger a Kanji drop for a specific level.")
+@app_commands.choices(level=[app_commands.Choice(name=lvl, value=lvl) for lvl in ["N5", "N4", "N3", "N2", "N1"]])
+@app_commands.describe(rollback="Set True to go back 1 step (use this to recover a skipped/missed drop).")
+async def drop_kanji(interaction: discord.Interaction, level: app_commands.Choice[str], rollback: bool = False):
+    await interaction.response.defer(ephemeral=True)
+    
+    # 1. Check Permissions
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied.", ephemeral=True)
+        
+    lvl_name = level.value
+    
+    # 2. Configs for the chosen level
+    configs = {
+        "N5": (N5_KANJI, 1, "n5-daily-kanji"),
+        "N4": (N4_KANJI, 1, "n4-daily-kanji"),
+        "N3": (N3_KANJI, 1, "n3-daily-kanji"),
+        "N2": (N2_KANJI, 2, "n2-daily-kanji"),
+        "N1": (N1_KANJI, 3, "n1-daily-kanji")
+    }
+    kanji_list, drop_count, ch_keyword = configs[lvl_name]
+    
+    channel = discord.utils.find(lambda c: ch_keyword in c.name.lower(), interaction.guild.channels)
+    if not channel:
+        return await interaction.followup.send(f"❌ Channel {ch_keyword} not found.", ephemeral=True)
+        
+    # 3. Get Current DB State
+    data = kanji_db.find_one({"level": lvl_name})
+    current_index = data["current_index"] if data else 0
+    
+    # 🟢 4. ROLLBACK LOGIC (Fixing missed drops)
+    if rollback:
+        current_index = max(0, current_index - drop_count)
+        
+    if current_index >= len(kanji_list):
+        current_index = 0
+        
+    revision_kanjis = []
+    if current_index >= drop_count:
+        revision_kanjis = kanji_list[current_index - drop_count : current_index]
+    elif current_index > 0:
+        revision_kanjis = kanji_list[0 : current_index]
+        
+    new_kanjis = kanji_list[current_index : current_index + drop_count]
+    if not new_kanjis:
+        current_index = 0
+        new_kanjis = kanji_list[current_index : current_index + drop_count]
+        
+    kanji_str = ", ".join(new_kanjis)
+    prompt = f"""You are an expert Japanese Sensei who cleared N1 within 2 years by smart-work and not hard-work. Explain ALL of the following {len(new_kanjis)} Kanji(s): {kanji_str}.
+    For EACH Kanji, strictly provide:
+    1. Meaning
+    2. Onyomi & Kunyomi (with Romaji)
+    3. One example of each kanji in a word with Onyomi & Kunyomi pronunciation being used (with romaji).
+    Format the entire response beautifully in Discord Markdown.
+    CRITICAL RULE: For the Kanji character heading itself, you MUST use a Markdown H1 tag (e.g., `# 妹` or `# 業`) so the Kanji appears massively large on Discord.
+    Keep the script entirely in English. Do NOT include memory or pronunciation tricks."""
+    
+    await interaction.followup.send(f"⏳ Generating manual drop for {lvl_name} (Kanjis: {kanji_str})...", ephemeral=True)
+    
+    try:
+        explanation = await generate_gemini_response(prompt)
+        rev_text = f"**🔄 Yesterday's Revision:** {', '.join(revision_kanjis)}\n\n" if revision_kanjis else ""
+        
+        embed = discord.Embed(
+            title=f"㊗️ {lvl_name} Daily Kanji Drop! (Manual Trigger)",
+            description=f"{rev_text}{explanation}"[:4096],
+            color=0xe74c3c
+        )
+        embed.set_footer(text=f"Kanji: {kanji_str} | Level: {lvl_name}")
+        
+        view = PersistentDailyKanjiView()
+        msg = await channel.send(embed=embed, view=view)
+        
+        # Update URLs for Dokkai
+        for k in new_kanjis:
+            kanji_db.update_one({"kanji_char": k}, {"$set": {"url": msg.jump_url, "level": lvl_name}}, upsert=True)
+            
+        # Update index safely
+        next_index = current_index + len(new_kanjis)
+        kanji_db.update_one({"level": lvl_name}, {"$set": {"current_index": next_index}}, upsert=True)
+        
+        await interaction.channel.send(f"✅ Manual drop for {lvl_name} completed successfully in {channel.mention}!")
+        
+    except Exception as e:
+        await interaction.channel.send(f"❌ Failed to generate manual drop: {e}")
 
 bot.run(os.environ.get("BOT_TOKEN"))
