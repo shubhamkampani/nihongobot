@@ -2043,9 +2043,9 @@ async def help_command(interaction: discord.Interaction):
 async def leaderboard(interaction: discord.Interaction, target_level: app_commands.Choice[str]):
     await interaction.response.defer(ephemeral=True)
     
-    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    has_permission = any(role.name in ["Junior Admin（ジュニア・アデュミン）", "Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
     if not has_permission:
-        return await interaction.followup.send("❌ Access Denied: You need `セィニア・アデュミン` or `ファウンダ` role to use this.", ephemeral=True)
+        return await interaction.followup.send("❌ Access Denied: You need to be an Admin to use this.", ephemeral=True)
     
     level_full_name = target_level.value
     top_scorers = quiz_db.find({"level": level_full_name}).sort([("score", -1), ("time_taken", 1)]).limit(5)
@@ -2209,9 +2209,9 @@ async def quiz(interaction: discord.Interaction):
 @bot.tree.command(name="leaderboardannounce", description="[Admin] Manually trigger Weekly Announcement for ALL levels & wipe DB.")
 async def leaderboard_announce(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    has_permission = any(role.name in ["Junior Admin（ジュニア・アデュミン）", "Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
     if not has_permission:
-        return await interaction.followup.send("❌ Access Denied: You need Senior Admin or Founder role.", ephemeral=True)
+        return await interaction.followup.send("❌ Access Denied: You need to be an Admin to use this command.", ephemeral=True)
         
     guild = interaction.guild
     
@@ -2418,11 +2418,11 @@ async def announce(interaction: discord.Interaction, message: str):
     await interaction.response.defer(ephemeral=True)
     
     # 1. Strict Role Check
-    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    has_permission = any(role.name in ["Junior Admin（ジュニア・アデュミン）", "Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
     if not has_permission:
-        return await interaction.followup.send("❌ Access Denied. Only Senior Admins and Founders can make official announcements.", ephemeral=True)
+        return await interaction.followup.send("❌ Access Denied. Only Admins and Founders can make official announcements.", ephemeral=True)
     
-    # 2. 🟢 THE PING FIX: Extract all mentions from the message
+    # 2. 🟢 Extract all mentions from the message
     # Discord embeds do NOT ping users/roles. We must put them in the regular message content.
     mentions = re.findall(r'<@!?\d+>|<@&\d+>|@everyone|@here', message)
     ping_content = " ".join(mentions) if mentions else ""
