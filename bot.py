@@ -685,7 +685,7 @@ async def execute_listening_task(guild, client, data):
         
         prompt = f"""You are an expert JLPT Examiner creating 'Nihongo Nook' style audio tests. Generate exactly {q_count} BRAND NEW, highly distinct Japanese listening scenarios for JLPT {level_short}.
         CRITICAL RULE 1 (DIVERSITY): Never repeat scenarios. Seed: [{random_seed}]. If generating multiple questions, EACH question MUST have a completely DIFFERENT topic/setting from the others. Do not stick to just one theme.
-        CRITICAL RULE 2 (LENGTH & GRAMMAR): The conversation between the male and female characters MUST be detailed and realistic, and ideally 6 to 7 lines of dialogue, but can use more lines according to {level_short}, if required for conversation. You MUST strictly incorporate grammar structures specific to the {level_short} level.
+        CRITICAL RULE 2 (LENGTH & GRAMMAR): The conversation between the male and female characters MUST be detailed and realistic, and ideally 7 to 8 lines of dialogue, but can use more lines according to {level_short}, if required for conversation completion. You MUST strictly incorporate grammar structures specific to the {level_short} level.
         CRITICAL RULE 3 (MULTI-VOICE): You MUST write the script as an array of dialogue lines, specifying the speaker's gender for EACH line ("narrator", "male", or "female"). The narrator introduces the situation and asks the question.
         CRITICAL RULE 4 (FURIGANA OPTIONS): The 4 options (A, B, C, D) MUST be strictly in Japanese. NEVER translate them to English. DO NOT USE any kanji in options, only use hiragana and katakana where-ever necessary. Only the "question" field should be in English.
         CRITICAL RULE 5 (ZERO STUTTERING): ABSOLUTELY NO WORD REPETITION. Do NOT write things like "あの、あの" or "ふたり、ふたりは". The Japanese must be 100% grammatically flawless and flow perfectly without any human-like stutters.
@@ -759,18 +759,38 @@ async def execute_listening_task(guild, client, data):
                     pitch = "+15Hz" 
                 else:
                     voice_model = "ja-JP-NanamiNeural"
-                    pitch = "-10Hz" 
+                    pitch = "-12Hz" 
                     
                 temp_file = f"temp_{guild.id}_{i}_{j}.mp3"
-                try:
-                    communicate = edge_tts.Communicate(text, voice_model, pitch=pitch)
-                    await communicate.save(temp_file)
-                    segment = AudioSegment.from_file(temp_file, format="mp3")
-                    combined_audio += segment
-                except Exception as e:
-                    print(f"TTS Segment Error: {e}")
-                finally:
-                    if os.path.exists(temp_file): os.remove(temp_file)
+                
+                # 🟢 Safe File Handling, Retry & Alarm Flag
+                max_retries = 3
+                success = False
+                for attempt in range(max_retries):
+                    try:
+                        communicate = edge_tts.Communicate(text, voice_model)
+                        await communicate.save(temp_file)
+                        await asyncio.sleep(0.5) 
+                        
+                        if os.path.exists(temp_file) and os.path.getsize(temp_file) > 100:
+                            segment = AudioSegment.from_file(temp_file, format="mp3")
+                            combined_audio += segment
+                            success = True
+                            break 
+                        else:
+                            raise Exception("File is empty.")
+                            
+                    except Exception as e:
+                        print(f"TTS Error (Attempt {attempt+1}): {e}")
+                        await asyncio.sleep(1) 
+                
+                if os.path.exists(temp_file): 
+                    try: os.remove(temp_file)
+                    except: pass
+                    
+                # 🚨 LOGIC: If 3 listening attempts failed, signal this to script
+                if not success:
+                    raise Exception("VOICE_ENGINE_FAILED")
             
             audio_file = f"listening_{guild.id}_{i}.mp3"
             combined_audio.export(audio_file, format="mp3")
@@ -819,8 +839,35 @@ async def execute_listening_task(guild, client, data):
         except: pass
         
     except Exception as e:
-        try: await interaction.edit_original_response(content=f"❌ Listening Error: {e}", embed=None, view=None)
-        except: pass
+        error_msg = str(e)
+        # 🚨 THE AUTOMATED ALARM LOGIC
+        if "VOICE_ENGINE_FAILED" in error_msg:
+             # 1. Tell user who used listening quiz that bot has failed
+            ticket_ch = discord.utils.get(guild.channels, name="🎫・create-a-ticket")
+            ticket_mention = ticket_ch.mention if ticket_ch else "#🎫・create-a-ticket"
+            
+            user_msg = f"😷 **Sensei's throat doesn't feel good...**\n*The AI voice engine suddenly stopped working and needs update.* Please contact the Admins at once by clicking here -> {ticket_mention}"
+            try: await interaction.edit_original_response(content=user_msg, embed=None, view=None)
+            except: pass
+            
+            # 2. Tag admins in #admin-logs
+            log_ch = discord.utils.get(guild.channels, name="admin-logs")
+            if log_ch:
+                sr_admin = discord.utils.get(guild.roles, name="Senior Admin（セィニア・アデュミン）")
+                founder = discord.utils.get(guild.roles, name="Founder（ファウンダ）")
+                ping_str = f"{founder.mention if founder else ''} {sr_admin.mention if sr_admin else ''}"
+                
+                admin_embed = discord.Embed(
+                    title="🚨 Urgent: Voice Engine Down!", 
+                    description=f"**User:** {user.mention}\n**Channel:** {original_vc.mention}\n\n`edge-tts` or an audio dependency has failed and needs an update immediately.\n\n👉 **Kindly run `/updatebot` now in  #bot-command channel!**", 
+                    color=0xe74c3c
+                )
+                client.loop.create_task(log_ch.send(content=ping_str, embed=admin_embed))
+        else:
+            try: await interaction.edit_original_response(content=f"❌ Listening Error: {e}", embed=None, view=None)
+            except: pass
+            
+    finally:
     finally:
         if voice_client and voice_client.is_connected():
             await voice_client.disconnect()
