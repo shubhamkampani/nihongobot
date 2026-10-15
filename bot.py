@@ -866,8 +866,6 @@ async def execute_listening_task(guild, client, data):
         else:
             try: await interaction.edit_original_response(content=f"❌ Listening Error: {e}", embed=None, view=None)
             except: pass
-            
-    finally:
     finally:
         if voice_client and voice_client.is_connected():
             await voice_client.disconnect()
