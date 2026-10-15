@@ -26,6 +26,9 @@ from difflib import SequenceMatcher
 from gtts import gTTS
 import os
 import base64 #Dependency for AI Vision (used in Vocab-Vault)
+import subprocess # This and next 2 dependency for /updatebot command
+import sys
+import os
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -3612,5 +3615,53 @@ async def drop_kanji(interaction: discord.Interaction, level: app_commands.Choic
         
     except Exception as e:
         await interaction.channel.send(f"❌ Failed to generate manual drop: {e}")
+
+import subprocess
+import sys
+import os
+
+@bot.tree.command(name="updatebot", description="[Admin Only] Auto-update all bot dependencies and safely restart.")
+async def update_bot(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # 1. Admin Check
+    has_permission = any(role.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied. Only Senior Admins can trigger system updates.", ephemeral=True)
+        
+    await interaction.followup.send("⏳ **Starting Auto-Update Protocol...**\n1️⃣ Fetching latest packages from Python Package Index...", ephemeral=True)
+    
+    try:
+        packages_to_update = [
+            "edge-tts", 
+            "discord.py", 
+            "pymongo", 
+            "aiohttp", 
+            "pydub", 
+            "SpeechRecognition", 
+            "flask",
+            "pytz"
+        ]
+        
+        # Run pip upgrade for all packages at once
+        command = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages_to_update
+        result = subprocess.run(command, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            terminal_logs = result.stdout[-800:] if len(result.stdout) > 800 else result.stdout
+            
+            # 🟢 Send success message with the last few lines of the terminal output
+            await interaction.followup.send(f"✅ **System Dependencies Checked & Updated!**\n*(Already updated packages were skipped automatically)*\n```bash\n...{terminal_logs}\n```\n🔄 **Bot is now RESTARTING to apply patches. It will be back online in ~5-10 seconds!**", ephemeral=True)
+            
+            # 3. Restart the Bot Process
+            os.execv(sys.executable, ['python'] + sys.argv)
+        else:
+            terminal_errors = result.stderr[-800:] if len(result.stderr) > 800 else result.stderr
+            # 🟢 Error log 
+            await interaction.followup.send(f"❌ **Update Failed in Console! Contact *Founder（ファウンダ）* **\n```bash\n...{terminal_errors}\n```", ephemeral=True)
+            
+    except Exception as e:
+        # 🟢 Crash log
+        await interaction.followup.send(f"❌ **Critical System Error during update,  Contact *Founder（ファウンダ）*:** {e}", ephemeral=True)
 
 bot.run(os.environ.get("BOT_TOKEN"))
