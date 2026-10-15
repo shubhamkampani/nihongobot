@@ -1874,7 +1874,7 @@ class NihongoBot(commands.Bot):
     async def freemium_dokkai_loop(self):
         now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
         
-        # 🟢 NEW: Fixed exactly at 6:00 PM (18:00) JST to prevent restart spam
+        # 🟢 Fixed exactly at 6:00 PM (18:00) JST to prevent restart spam
         if now_jst.hour == 18 and now_jst.minute == 0:
             if not getattr(self, 'daily_dokkai_done', False):
                 self.daily_dokkai_done = True
@@ -1886,31 +1886,46 @@ class NihongoBot(commands.Bot):
         topics = ["Japanese Culture", "A Sci-Fi Adventure", "Daily Mysteries & Unspoken Rules", "A Slice of Life moment", "A Mystery", "Folklore", "School Life", "Japanese Food & Café Culture", "Modern Habits & Tech"]
         topic = random.choice(topics)
         
+        # 🟢 Added 'lower_levels' array so the bot remembers past JLPT levels
         level_configs = [
-            ("N5", "n5-daily-dokkai", N5_KANJI),
-            ("N4", "n4-daily-dokkai", N4_KANJI),
-            ("N3", "n3-daily-dokkai", N3_KANJI),
-            ("N2", "n2-daily-dokkai", N2_KANJI),
-            ("N1", "n1-daily-dokkai", N1_KANJI)
+            ("N5", "n5-daily-dokkai", N5_KANJI, []),
+            ("N4", "n4-daily-dokkai", N4_KANJI, [N5_KANJI]),
+            ("N3", "n3-daily-dokkai", N3_KANJI, [N5_KANJI, N4_KANJI]),
+            ("N2", "n2-daily-dokkai", N2_KANJI, [N5_KANJI, N4_KANJI, N3_KANJI]),
+            ("N1", "n1-daily-dokkai", N1_KANJI, [N5_KANJI, N4_KANJI, N3_KANJI, N2_KANJI])
         ]
         
         for guild in self.guilds:
-            for lvl_name, ch_keyword, kanji_list in level_configs:
+            for lvl_name, ch_keyword, kanji_list, lower_levels in level_configs:
                 channel = discord.utils.find(lambda c: ch_keyword in c.name.lower(), guild.channels)
                 if not channel:
                     continue
                     
-                # Fetch covered kanjis to prevent AI from adding furigana to them
+                # 🟢 LOGIC: Build a Master List of ALL Known Kanjis
+                known_kanjis_list = []
+                # 1. Add all Kanjis from lower levels
+                for lower_list in lower_levels:
+                    known_kanjis_list.extend(lower_list)
+                    
+                # 2. Add dropped Kanjis from the current level
                 db_data = kanji_db.find_one({"level": lvl_name})
                 current_idx = db_data["current_index"] if db_data else 0
-                covered_kanjis = "".join(kanji_list[:current_idx]) if current_idx > 0 else ""
                 
+                if current_idx > 0:
+                    known_kanjis_list.extend(kanji_list[:current_idx])
+                    
+                known_kanjis_str = "".join(known_kanjis_list)
                 needs_romaji = lvl_name in ["N5", "N4"]
                 
+                # 🟢 LOGIC: Advanced Strict Prompt for Partial Kanji Words
                 prompt = f"""You are an expert Japanese linguist and JLPT examiner.
                 Task: Generate a short narrative (max 300 Japanese characters) about '{topic}'.
-                Constraint 1: Strictly use ONLY vocabulary and grammar points from JLPT levels N5 up to {lvl_name}.
-                Constraint 2 (SMART FURIGANA): The user ALREADY KNOWS these kanjis: [{covered_kanjis}]. Do NOT add furigana to these kanjis. For ANY OTHER Kanji you use that is NOT in this list, you MUST provide furigana in parentheses immediately after it (e.g., 漢字（かんじ）)."""
+                Constraint 1: Strictly use ONLY vocabulary and grammar points majorly from {lvl_name} till N5 level.
+                Constraint 2 (SMART FURIGANA): The user ALREADY KNOWS these kanjis: [{known_kanjis_str}].
+                CRITICAL FURIGANA RULE: 
+                - If a Japanese word contains multiple kanjis (e.g., 毎日), and EVEN ONE of those kanjis is in the known list, DO NOT provide furigana for that entire word.
+                - Only provide furigana in parentheses (e.g., 漢字（かんじ）) for words where EVERY SINGLE KANJI in the word is UNKNOWN (not in the list). 
+                - Do NOT add furigana for any single kanjis the user already knows or lower-level kanjis."""
                 
                 if needs_romaji:
                     prompt += """\nOutput Format: Return ONLY valid JSON with exactly three keys: "title", "story_content", and "romaji" (the exact romaji pronunciation of the story text)."""
@@ -1926,13 +1941,11 @@ class NihongoBot(commands.Bot):
                     content = story_data.get("story_content", "Could not generate story.")
                     romaji = story_data.get("romaji", "")
 
-                    # 🟢 PYTHON HYPERLINK INJECTOR
-                    # DB se saari covered kanjis aur unke links uthao
+                    # 🟢 PYTHON HYPERLINK INJECTOR (Unchanged, it's perfect)
                     db_kanjis = kanji_db.find({"level": lvl_name, "url": {"$exists": True}})
                     for doc in db_kanjis:
                         k_char = doc.get("kanji_char")
                         k_url = doc.get("url")
-                        # Replacing kanji in story with discord hyperlink
                         if k_char and k_char in content:
                             content = content.replace(k_char, f"[{k_char}]({k_url})")
 
