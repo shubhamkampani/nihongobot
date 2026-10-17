@@ -3120,7 +3120,6 @@ class VaultVocabSelect(Select):
         else:
             feedback_msg = f"Nice revision! A solid {word_jlpt} word to keep your foundations strong."
 
-        # 🟢 HYPERLINK INJECTOR (Like Dokkai Drop)
         linked_kanji_display = word_kanji
         db_kanjis = kanji_db.find({"url": {"$exists": True}})
         for doc in db_kanjis:
@@ -3129,6 +3128,13 @@ class VaultVocabSelect(Select):
             if k_char and k_char in linked_kanji_display:
                 linked_kanji_display = linked_kanji_display.replace(k_char, f"[{k_char}]({k_url})")
         
+        # 🟢 DYNAMIC IMAGE URL GRABBER (Fixes the blank flashcard bug!)
+        final_img_url = self.img_url
+        if interaction.message.embeds and interaction.message.embeds[0].image:
+            final_img_url = interaction.message.embeds[0].image.url
+        elif interaction.message.attachments:
+            final_img_url = interaction.message.attachments[0].url
+            
         # Save to MongoDB
         next_review = int(time.time()) + 86400 # 24 hours
         vocab_db.insert_one({
@@ -3136,7 +3142,7 @@ class VaultVocabSelect(Select):
             "kanji": word_kanji,
             "kana": word_kana,
             "english": selected_vocab.get("english"),
-            "image_url": self.img_url,
+            "image_url": final_img_url,  # 🟢 Safe URL used
             "level": 1,
             "next_review": next_review
         })
@@ -3273,8 +3279,13 @@ class BulkVocabSelect(Select):
         # Save to DB using the generated Discord URLs
         for i, val in enumerate(self.values):
             vocab_item = self.options_data[int(val)]
-            # 🟢 Grab direct permanent CDN URL from flashcard/attachments, not embed!
-            img_url = msg.attachments[i].url
+            
+            # 🟢 SAFE URL GRABBER FOR BULK (Fixes the IndexError crash!)
+            img_url = ""
+            if len(msg.embeds) > i and msg.embeds[i].image:
+                img_url = msg.embeds[i].image.url
+            elif len(msg.attachments) > i:
+                img_url = msg.attachments[i].url
             
             vocab_db.insert_one({
                 "user_id": interaction.user.id,
@@ -3674,9 +3685,6 @@ async def drop_kanji(interaction: discord.Interaction, level: app_commands.Choic
     except Exception as e:
         await interaction.channel.send(f"❌ Failed to generate manual drop: {e}")
 
-import subprocess
-import sys
-import os
 
 @bot.tree.command(name="updatebot", description="[Admin Only] Auto-update all bot dependencies and safely restart.")
 async def update_bot(interaction: discord.Interaction):
@@ -3722,4 +3730,108 @@ async def update_bot(interaction: discord.Interaction):
         # 🟢 Crash log
         await interaction.followup.send(f"❌ **Critical System Error during update,  Contact *Founder（ファウンダ）*:** {e}", ephemeral=True)
 
+# Command for fixing missed images in vault
+@bot.tree.command(name="healvault", description="[Admin Only] Auto-regenerate missing/broken flashcards in the database.")
+async def heal_vault(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # 1. Admin Check
+    has_permission = any(role.name in ["Junior Admin（ジュニア・アデュミン）", "Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）"] for role in interaction.user.roles)
+    if not has_permission:
+        return await interaction.followup.send("❌ Access Denied. Can only be used by Admins. Contact Admins if you want to fix your vault.", ephemeral=True)
+        
+    # 2. Find cards with missing or broken URLs
+    broken_cards = list(vocab_db.find({
+        "$or": [
+            {"image_url": {"$exists": False}},
+            {"image_url": ""},
+            {"image_url": {"$regex": "^attachment://"}} 
+        ]
+    }))
+    
+    if not broken_cards:
+        return await interaction.followup.send("✅ **Vault is 100% Healthy!** No broken flashcards found.", ephemeral=True)
+        
+    await interaction.followup.send(f"🛠️ **Found {len(broken_cards)} broken flashcards.** Initiating Smart Auto-Heal & Garbage Collection...", ephemeral=True)
+    
+    main_channel = discord.utils.get(interaction.guild.channels, name="📸・vocab-vault")
+    log_ch = discord.utils.get(interaction.guild.channels, name="admin-logs")
+    
+    sr_admin = discord.utils.get(interaction.guild.roles, name="Senior Admin（セィニア・アデュミン）")
+    founder = discord.utils.get(interaction.guild.roles, name="Founder（ファウンダ）")
+    ping_str = f"{founder.mention if founder else ''} {sr_admin.mention if sr_admin else ''}"
+    
+    healed_count = 0
+    deleted_users = set() # To track left users and avoid spamming the log
+    
+    for doc in broken_cards:
+        try:
+            uid = doc.get("user_id")
+            
+            #Skipping alraeady left user, if rejoins server
+            if uid in deleted_users:
+                continue
+                
+            user = interaction.guild.get_member(uid)
+            
+            # 🚨 1. SMART GARBAGE COLLECTION (User has left the server)
+            if not user:
+                deleted_users.add(uid)
+                
+                # Fetch Discord API to find username (as user is no more in server)
+                try:
+                    fetched_user = await interaction.client.fetch_user(uid)
+                    username = fetched_user.name
+                    user_mention = fetched_user.mention
+                except:
+                    username = f"Unknown_{uid}"
+                    user_mention = f"<@{uid}>"
+                
+                # A. Purana Thread dhoondh ke delete karo
+                if main_channel:
+                    thread_name = f"🧵 {username}'s Vault"
+                    user_thread = discord.utils.get(main_channel.threads, name=thread_name)
+                    if user_thread:
+                        try: await user_thread.delete()
+                        except: pass
+                
+                # B. Clearing database of user who has left the server
+                vocab_db.delete_many({"user_id": uid})
+                
+                # C. Reporting in Admin Logs 
+                if log_ch:
+                    embed = discord.Embed(title="🗑️ Orphaned Vault Deleted", description=f"The user {user_mention} ({username}) has left the server.\n\nDuring the Auto-Heal process, all their **Vocab Vault data and private thread** were permanently deleted instead of being fixed to save DB space.", color=0xe74c3c)
+                    await log_ch.send(content=ping_str, embed=embed)
+                    
+                continue # Aage badho (is word ko fix mat karo)
+
+            # 🛠️ 2. AUTO-HEALING PROCESS (User is still in server)
+            dump_channel = interaction.channel 
+            thread_name = f"🧵 {user.name}'s Vault"
+            
+            if main_channel:
+                user_thread = discord.utils.get(main_channel.threads, name=thread_name)
+                if user_thread:
+                    dump_channel = user_thread 
+            
+            word_eng = str(doc.get("english", "Unknown"))
+            
+            arr = await generate_flashcard_bytes(word_eng)
+            file = discord.File(arr, filename="heal_flashcard.png")
+            
+            msg = await dump_channel.send(content=f"🛠️ `[HealBot Auto-Recovery]` Fixed missing image for: **{word_eng}**", file=file)
+            
+            new_url = ""
+            if msg.attachments:
+                new_url = msg.attachments[0].url
+                
+            if new_url:
+                vocab_db.update_one({"_id": doc["_id"]}, {"$set": {"image_url": new_url}})
+                healed_count += 1
+                
+        except Exception as e:
+            print(f"Heal Error for {doc.get('english', 'Unknown')}: {e}")
+            
+    await interaction.followup.send(f"✅ **Healing & Cleanup Complete!**\n- Successfully recovered: **{healed_count} flashcards**.\n- Orphaned vaults deleted: **{len(deleted_users)} users**.", ephemeral=True)
+    
 bot.run(os.environ.get("BOT_TOKEN"))
