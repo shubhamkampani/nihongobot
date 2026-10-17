@@ -3208,6 +3208,13 @@ async def generate_flashcard_bytes(word_eng):
     display_text = word_eng.upper()
     max_width, font_size = size - 80, 75
     
+    # 🟢 FIXED: Default values set explicitly so it NEVER crashes on long texts
+    text_w, text_h = max_width, size / 2 
+    wrapped_text = display_text
+    
+    try: font = ImageFont.truetype("pixel.ttf", font_size)
+    except: font = ImageFont.load_default()
+    
     while font_size > 15:
         try: font = ImageFont.truetype("pixel.ttf", font_size)
         except: font = ImageFont.load_default(); break
@@ -3223,9 +3230,11 @@ async def generate_flashcard_bytes(word_eng):
             if lw > max_line_width: max_line_width = lw
                 
         text_h = len(wrapped_lines) * (font_size * 1.3)
+        text_w = max_line_width # 🟢 Variable assigned safely in EVERY loop iteration
+        
         if max_line_width <= max_width and text_h <= (size - 80):
-            text_w = max_line_width
-            break
+            break # Perfect fit!
+            
         font_size -= 4
         
     draw.multiline_text(((size - text_w) / 2, (size - text_h) / 2), wrapped_text, font=font, fill=(255, 255, 255, 255), align="center")
