@@ -3470,15 +3470,21 @@ async def on_message(message: discord.Message):
                 )
                 embed.set_image(url="attachment://flashcard.png")
                 
+                # Single Word Dropdown View
                 vocab_options = [{"kanji": word_kanji, "kana": word_kana, "english": word_eng, "jlpt": word_jlpt}]
                 view = VaultVocabSelectView(user, vocab_options, "attachment://flashcard.png", message)
                 
-                await temp_msg.delete()
-                bot_msg = await thread.send(content=user.mention, embed=embed, file=file, view=view)
-                # 🟢 Grab direct permanent CDN URL from flashcard/attachments, not embed!
-                view.children[0].img_url = bot_msg.attachments[0].url
+                # 🟢 New Logic
+                try: 
+                    await temp_msg.delete()
+                except: 
+                    pass
+                
+                # Sirf message send karo. Yahan se URL nikalne ki koi "kachra" line mat likhna!
+                await thread.send(content=user.mention, embed=embed, file=file, view=view)
                 
             except Exception as e:
+                # Agar Gemini API fail hoti hai sirf tabhi ye error dikhega
                 try: await temp_msg.edit(content=f"❌ Failed to analyze text: {e}")
                 except: await thread.send(content=f"❌ Failed to analyze text: {e}")
                         
