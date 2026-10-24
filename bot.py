@@ -1030,6 +1030,252 @@ class QuizSelectionView(View):
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ AI Fetch Error: {e}")
 
+# ==========================================
+# 📖 UNIVERSAL VOCAB EXTRACTOR & VAULT SAVER
+# ==========================================
+async def get_or_unarchive_user_vault(guild, user):
+    main_channel = discord.utils.get(guild.channels, name="📸・vocab-vault")
+    if not main_channel:
+        return None, None
+        
+    thread_name = f"🧵 {user.name}'s Vault"
+    existing_thread = discord.utils.get(main_channel.threads, name=thread_name)
+    if existing_thread:
+        return main_channel, existing_thread
+        
+    try:
+        async for arch_thread in main_channel.archived_threads(limit=100):
+            if arch_thread.name == thread_name:
+                try:
+                    await arch_thread.edit(archived=False)
+                except Exception:
+                    pass
+                return main_channel, arch_thread
+    except Exception:
+        pass
+        
+    return main_channel, None
+
+
+class ExtractedVocabSelect(Select):
+    def __init__(self, options_data, vault_thread):
+        self.options_data = options_data
+        self.vault_thread = vault_thread
+        
+        select_options = []
+        for idx, opt in enumerate(options_data[:25]):
+            label_name = f"{opt.get('kanji', 'Unknown')} - {opt.get('english', 'Unknown')}"
+            desc = f"{opt.get('kana', '')} [{opt.get('jlpt', 'Unknown')}]"
+            select_options.append(discord.SelectOption(
+                label=label_name[:100],
+                value=str(idx),
+                description=desc[:100],
+                emoji="🎌"
+            ))
+            
+        super().__init__(
+            placeholder="Select the vocabulary words you want to save...",
+            min_values=1,
+            max_values=min(len(select_options), 5),
+            options=select_options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="⏳ **Generating premium flashcards and saving to your Vocab Vault... Please wait!**",
+            embed=None,
+            view=None
+        )
+        
+        files = []
+        embeds = []
+        selected_items = [self.options_data[int(val)] for val in self.values]
+        
+        for i, vocab_item in enumerate(selected_items):
+            word_eng = str(vocab_item.get("english", "Unknown"))
+            arr = await generate_flashcard_bytes(word_eng)
+            filename = f"extracted_card_{i}.png"
+            files.append(discord.File(arr, filename=filename))
+            
+            embed = discord.Embed(color=0x3498db)
+            embed.set_image(url=f"attachment://{filename}")
+            embed.set_footer(text=f"{vocab_item.get('kanji')} ({vocab_item.get('kana')}) - {vocab_item.get('jlpt')}")
+            embeds.append(embed)
+            
+        try:
+            msg = await self.vault_thread.send(
+                content=f"📥 {interaction.user.mention} **Extracted Vocabulary Flashcards:**",
+                files=files,
+                embeds=embeds
+            )
+            
+            for i, vocab_item in enumerate(selected_items):
+                img_url = ""
+                if len(msg.embeds) > i and msg.embeds[i].image:
+                    img_url = msg.embeds[i].image.url
+                elif len(msg.attachments) > i:
+                    img_url = msg.attachments[i].url
+                    
+                vocab_db.insert_one({
+                    "user_id": interaction.user.id,
+                    "kanji": vocab_item.get("kanji", ""),
+                    "kana": vocab_item.get("kana", ""),
+                    "english": vocab_item.get("english", ""),
+                    "image_url": img_url,
+                    "level": 1,
+                    "next_review": int(time.time()) + 86400
+                })
+                
+            await interaction.edit_original_response(
+                content=f"✅ **{len(selected_items)} Flashcard(s) successfully generated and saved to {self.vault_thread.mention}!**\n*Sensei will test you on these in your daily SRS reviews to upgrade them from Level 1 to Level 5.*"
+            )
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Failed to save flashcards to your vault: {e}")
+
+
+class ExtractedVocabSaveView(View):
+    def __init__(self, user, options_data, vault_thread):
+        super().__init__(timeout=180)
+        self.user = user
+        self.add_item(ExtractedVocabSelect(options_data, vault_thread))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id:
+            return
+        await interaction.response.edit_message(content="✅ Vocabulary extraction cancelled.", embed=None, view=None)
+
+
+class VocabRetryView(View):
+    def __init__(self, user, source_text, source_title):
+        super().__init__(timeout=180)
+        self.user = user
+        self.source_text = source_text
+        self.source_title = source_title
+        self.cooldown_until = time.time() + 12.0
+
+    @discord.ui.button(label="🔄 Retry Extraction (12s Cooldown)", style=discord.ButtonStyle.primary)
+    async def btn_retry(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ This is not your session!", ephemeral=True)
+            
+        remaining = self.cooldown_until - time.time()
+        if remaining > 0:
+            return await interaction.response.send_message(
+                f"⏳ **AI Engine Cooling Down:** Please wait **{int(remaining) + 1} more seconds** before clicking Retry!",
+                ephemeral=True
+            )
+            
+        await interaction.response.edit_message(content="⏳ **Retrying vocabulary extraction...**", embed=None, view=None)
+        await trigger_universal_vocab_extractor(interaction, self.source_text, self.source_title, is_retry=True)
+
+
+async def trigger_universal_vocab_extractor(interaction: discord.Interaction, source_text: str, source_title: str = "Content", is_retry: bool = False):
+    if not is_retry and not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+        
+    user = interaction.user
+    guild = interaction.guild
+    
+    user_level_role = next((r.name for r in user.roles if r.name in ROLE_NAMES), None)
+    level_short = user_level_role.split(" ")[1] if user_level_role else "N5"
+    has_pro = any(r.name == "金 Pro Learners 金" for r in user.roles)
+    
+    vault_thread = None
+    if has_pro and guild:
+        main_channel, vault_thread = await get_or_unarchive_user_vault(guild, user)
+        if not vault_thread:
+            ch_mention = main_channel.mention if main_channel else "#📸・vocab-vault"
+            err_msg = (
+                f"❌ **Your Vocabulary Vault doesn't exist!**\n\n"
+                f"Go to {ch_mention} and type `/vocabvault`. "
+                f"Then you can start extracting vocabulary and saving it in your vault!"
+            )
+            if is_retry:
+                return await interaction.edit_original_response(content=err_msg, embed=None, view=None)
+            else:
+                return await interaction.followup.send(content=err_msg, ephemeral=True)
+
+    # 🟢 SAFE SINGLE-LINE STRING CONCATENATION (Zero Triple Quotes!)
+    prompt = (
+        f"You are an expert Japanese JLPT sensei with 20 years of experience in teaching students of JLPT {level_short}.\n"
+        f"Analyze the following text and extract key Japanese vocabulary words that match the user's JLPT {level_short} level "
+        f"(ignore words from other levels unless there are zero exact {level_short} words, in which case pick up to 4 useful words closest to {level_short}).\n"
+        f"Maximum words to extract: 5.\n"
+        f"Return STRICTLY a valid JSON array of objects. Each object MUST have keys: "
+        f"\"kanji\" (word in Kanji or Kana), \"kana\" (Hiragana/Katakana reading), \"english\" (concise English meaning, max 4 words), and \"jlpt\" (\"{level_short}\").\n\n"
+        f"Text to analyze:\n{source_text[:2500]}"
+    )
+
+    try:
+        raw_text = await generate_gemini_response(prompt)
+        vocab_list = extract_json(raw_text)
+        
+        if not isinstance(vocab_list, list) or len(vocab_list) == 0 or "question" in vocab_list[0]:
+            raise ValueError("Could not parse vocabulary from AI response.")
+            
+        vocab_list = vocab_list[:5]
+        desc_lines = []
+        for idx, v in enumerate(vocab_list):
+            k_word = v.get("kanji", "Unknown")
+            kana_word = v.get("kana", "")
+            eng_word = v.get("english", "")
+            jlpt_tag = v.get("jlpt", level_short)
+            desc_lines.append(f"**{idx+1}. {k_word}** ({kana_word}) — *{eng_word}* `[{jlpt_tag}]`")
+            
+        vocab_display = "\n".join(desc_lines)
+        
+        if has_pro and vault_thread:
+            embed = discord.Embed(
+                title=f"📖 Extracted {level_short} Vocabulary ({source_title})",
+                description=(
+                    f"Sensei found the following **{level_short}** vocabulary for you:\n\n"
+                    f"{vocab_display}\n\n"
+                    f"👇 **Select the words below to generate flashcards and save them directly to {vault_thread.mention}!**"
+                ),
+                color=0x2ecc71
+            )
+            view = ExtractedVocabSaveView(user, vocab_list, vault_thread)
+            if is_retry:
+                await interaction.edit_original_response(content="", embed=embed, view=view)
+            else:
+                await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            gopro_ch = discord.utils.get(guild.channels, name="💎・go-pro") if guild else None
+            gopro_mention = gopro_ch.mention if gopro_ch else "#💎・go-pro"
+            
+            embed = discord.Embed(
+                title=f"📖 Extracted {level_short} Vocabulary ({source_title})",
+                description=(
+                    f"Here is the **{level_short}** vocabulary extracted for your level:\n\n"
+                    f"{vocab_display}\n\n"
+                    f"────────────────────────\n"
+                    f"💎 {gopro_mention} now and become a pro learner to save vocab to your vocab vault!"
+                ),
+                color=0xf1c40f
+            )
+            if is_retry:
+                await interaction.edit_original_response(content="", embed=embed, view=None)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                
+    except Exception as e:
+        retry_view = VocabRetryView(user, source_text, source_title)
+        err_embed = discord.Embed(
+            title="⚠️ AI Engine Busy (Too Many Requests)",
+            description=(
+                f"Sensei's AI engine is currently handling high traffic.\n"
+                f"*Details: {e}*\n\n"
+                f"⏳ **Please wait 12 seconds and click the Retry button below to extract your vocabulary!**"
+            ),
+            color=0xe74c3c
+        )
+        if is_retry:
+            await interaction.edit_original_response(content="", embed=err_embed, view=retry_view)
+        else:
+            await interaction.followup.send(embed=err_embed, view=retry_view, ephemeral=True)
+
+
 class StoryReaderView(View):
     def __init__(self, user, level, story_content):
         super().__init__(timeout=None)
@@ -1041,12 +1287,14 @@ class StoryReaderView(View):
         if interaction.user.id != self.user.id:
             return await interaction.response.send_message("❌ This is not your reading session!", ephemeral=True)
         
+        if task_type == "vocab":
+            return await trigger_universal_vocab_extractor(interaction, self.story_content, "Custom Story")
+            
         await interaction.response.defer(ephemeral=True)
         
         prompts = {
             "translate": f"Translate this Japanese story to English naturally:\n\n{self.story_content}",
-            "grammar": f"Analyze the key JLPT {self.level} grammar points used in this story. Explain them simply:\n\n{self.story_content}",
-            "vocab": f"Extract the key JLPT {self.level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{self.story_content}"
+            "grammar": f"Analyze the key JLPT {self.level} grammar points used in this story. Explain them simply:\n\n{self.story_content}"
         }
         
         try:
@@ -1068,6 +1316,7 @@ class StoryReaderView(View):
     async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_analysis(interaction, "vocab")
 
+
 # --- 🟢 PERSISTENT VIEWS (Fixes Restart Dead Buttons) ---
 class PersistentFreemiumStoryView(View):
     def __init__(self):
@@ -1079,7 +1328,7 @@ class PersistentFreemiumStoryView(View):
         if not has_pro:
             embed = discord.Embed(
                 title="🔒 Premium Feature Locked", 
-                description="Oops! Grammar and Vocab analysis are exclusively available for our **金 Pro Learners 金**.\n\nUnlock the full potential of your Japanese journey with unlimited personalized AI stories, deep grammar analysis, and much more! Upgrade today to access this and other pro tools. ✨", 
+                description="Oops! Grammar analysis is exclusively available for our **金 Pro Learners 金**.\n\nUnlock the full potential of your Japanese journey with unlimited personalized AI stories, deep grammar analysis, and much more! Upgrade today to access this and other pro tools. ✨", 
                 color=0xf1c40f
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1087,13 +1336,15 @@ class PersistentFreemiumStoryView(View):
         return True
 
     async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
-        await interaction.response.defer(ephemeral=True)
-        
-        # Reads the story content directly from the existing Discord message!
         embed_data = interaction.message.embeds[0]
         story_content = embed_data.description
         footer_text = embed_data.footer.text
         level = footer_text.split(" | ")[0].replace("Level: ", "")
+        
+        if task_type == "vocab":
+            return await trigger_universal_vocab_extractor(interaction, story_content, f"{level} Daily Dokkai")
+            
+        await interaction.response.defer(ephemeral=True)
         
         cache_key = f"{interaction.message.id}_{task_type}"
         
@@ -1102,8 +1353,7 @@ class PersistentFreemiumStoryView(View):
         else:
             prompts = {
                 "translate": f"Translate this Japanese story to English naturally:\n\n{story_content}",
-                "grammar": f"Analyze the key JLPT {level} grammar points used in this story. Explain them simply:\n\n{story_content}",
-                "vocab": f"Extract the key JLPT {level} vocabulary from this story. Provide the Kanji, reading (Romaji), and meaning:\n\n{story_content}"
+                "grammar": f"Analyze the key JLPT {level} grammar points used in this story. Explain them simply:\n\n{story_content}"
             }
             try:
                 response_text = await generate_gemini_response(prompts[task_type])
@@ -1123,10 +1373,10 @@ class PersistentFreemiumStoryView(View):
         if await self.check_premium(interaction):
             await self.handle_analysis(interaction, "grammar")
 
-    @discord.ui.button(label="📖 Extract Vocab (Pro)", style=discord.ButtonStyle.secondary, custom_id="freemium_voc")
+    @discord.ui.button(label="📖 Extract Vocab", style=discord.ButtonStyle.secondary, custom_id="freemium_voc")
     async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.check_premium(interaction):
-            await self.handle_analysis(interaction, "vocab")
+        await self.handle_analysis(interaction, "vocab")
+
 
 class PersistentDailyKanjiView(View):
     def __init__(self):
@@ -1147,11 +1397,11 @@ class PersistentDailyKanjiView(View):
             response_text = self.cached_responses[cache_key]
         else:
             if trick_type == "visual":
-                prompt = f"Create a short, logical visual memory trick for an English speaker to remember the shape/radicals of these JLPT {level} Kanji(s): {kanji_str}. Relate the shapes to a real-life object or scene which can be imagined easily."
+                prompt = f"Create a short, logical visual memory trick for an English speaker to remember the shape/radicals of these JLPT {level} Kanji(s): {kanji_str}. Relate the shapes to a real-life object or scene which can be imagined easily. Be realistic with story, do not join or assemble words just to make a meaninigless story."
             elif trick_type == "pronunciation":
                 prompt = f"Create a highly creative pronunciation trick for an English speaker to remember the reading of these JLPT {level} Kanji(s): {kanji_str}. Find English words or puns that sound exactly/similar to the Romaji reading."
             elif trick_type == "story":
-                prompt = f"For the JLPT {level} Kanji(s) '{kanji_str}', create a highly imaginative 1-2 sentence 'Memory Story'. Combine its Visual shape and its Pronunciation (using an English pun) into one unforgettable scenario."
+                prompt = f"For the JLPT {level} Kanji(s) '{kanji_str}', create a highly imaginative 1-2 sentence 'Memory Story'. Combine its Visual shape and its Pronunciation (using an English pun) into one unforgettable scenario. Be realistic with scenario, do not join or assemble words just to make a meaninigless scenario."
             
             try:
                 response_text = await generate_gemini_response(prompt)
@@ -1183,6 +1433,55 @@ class PersistentDailyKanjiView(View):
     @discord.ui.button(label="🧠 Memory Story", style=discord.ButtonStyle.danger, custom_id="kanji_story")
     async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_trick(interaction, "story")
+
+class JournalThreadView(View):
+    def __init__(self, user, level, original, corrected, thread):
+        super().__init__(timeout=None)
+        self.user = user
+        self.level = level
+        self.original = original
+        self.corrected = corrected
+        self.thread = thread
+        self.cached_responses = {} 
+
+    async def handle_analysis(self, interaction: discord.Interaction, task_type: str):
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ This is not your journal session!", ephemeral=True)
+        
+        if task_type == "vocab":
+            return await trigger_universal_vocab_extractor(interaction, self.corrected, "Daily Journal")
+            
+        await interaction.response.defer(ephemeral=True)
+        
+        if task_type in self.cached_responses:
+            response_text = self.cached_responses[task_type]
+        else:
+            if task_type == "translate":
+                prompt = f"Analyze these two Japanese texts. 1) Original: {self.original} 2) Corrected: {self.corrected}. Explain briefly how the original sounded (awkward/literal) versus how the corrected sentence sounds in natural English."
+            elif task_type == "reading":
+                prompt = f"Rewrite this Japanese text, adding furigana in square brackets exactly after EVERY Kanji used: {self.corrected}. Example format: 毎日 [まいにち] 漢字 [かんじ] を 勉強 [べんきょう] します。"
+            
+            try:
+                response_text = await generate_gemini_response(prompt)
+                self.cached_responses[task_type] = response_text
+            except Exception as e:
+                return await interaction.followup.send(f"❌ API Error: {e}", ephemeral=True)
+
+        embed = discord.Embed(title=f"📖 {task_type.capitalize()} Analysis", description=response_text[:4000], color=0x9b59b6)
+        await self.thread.send(content=f"{interaction.user.mention}, here is your {task_type} analysis:", embed=embed)
+        await interaction.followup.send(f"✅ Sent to your thread: {self.thread.mention}", ephemeral=True)
+
+    @discord.ui.button(label="🇬🇧 Translate (Before/After)", style=discord.ButtonStyle.primary)
+    async def btn_trans(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "translate")
+
+    @discord.ui.button(label="📖 Reading Guide", style=discord.ButtonStyle.success)
+    async def btn_read(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "reading")
+
+    @discord.ui.button(label="📖 Extract Vocab", style=discord.ButtonStyle.secondary)
+    async def btn_vocab(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_analysis(interaction, "vocab")
 
 class JournalThreadView(View):
     def __init__(self, user, level, original, corrected, thread):
@@ -3178,9 +3477,9 @@ class VaultVocabSelectView(View):
         return True
 
 # ==========================================
-# 🟢 HELPER: PREMIUM FLASHCARD GENERATOR
+# 🟢 HELPER: NON-BLOCKING PREMIUM FLASHCARD GENERATOR
 # ==========================================
-async def generate_flashcard_bytes(word_eng):
+def _sync_generate_flashcard_bytes(word_eng):
     from PIL import Image, ImageDraw, ImageFilter, ImageFont
     import random, io, textwrap
     
@@ -3208,7 +3507,6 @@ async def generate_flashcard_bytes(word_eng):
     display_text = word_eng.upper()
     max_width, font_size = size - 80, 75
     
-    # 🟢 FIXED: Default values set explicitly so it NEVER crashes on long texts
     text_w, text_h = max_width, size / 2 
     wrapped_text = display_text
     
@@ -3230,10 +3528,10 @@ async def generate_flashcard_bytes(word_eng):
             if lw > max_line_width: max_line_width = lw
                 
         text_h = len(wrapped_lines) * (font_size * 1.3)
-        text_w = max_line_width # 🟢 Variable assigned safely in EVERY loop iteration
+        text_w = max_line_width
         
         if max_line_width <= max_width and text_h <= (size - 80):
-            break # Perfect fit!
+            break
             
         font_size -= 4
         
@@ -3242,6 +3540,10 @@ async def generate_flashcard_bytes(word_eng):
     img.save(arr, format='PNG')
     arr.seek(0)
     return arr
+
+async def generate_flashcard_bytes(word_eng):
+    # Runs heavy PIL image rendering in a separate thread so voice/music streaming never lags!
+    return await asyncio.to_thread(_sync_generate_flashcard_bytes, word_eng)
 
 class BulkVocabSelect(Select):
     def __init__(self, options_data, original_message):
