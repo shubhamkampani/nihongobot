@@ -4559,7 +4559,7 @@ class MusicDeckView(View):
                 vc_client.stop() # Triggers after_playing to load next song
                 await interaction.response.send_message("⏭️ Song Skipped.", ephemeral=True)
 
-    @discord.ui.button(label="AUTOPLAY", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="AUTOPLAY", style=discord.ButtonStyle.secondary, row=1)
     async def btn_autoplay(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
             await interaction.response.send_message("🤖 Autoplay toggled (Feature coming soon)!", ephemeral=True)
