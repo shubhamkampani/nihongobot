@@ -4264,24 +4264,25 @@ async def heal_vault(interaction: discord.Interaction):
 # 🎵 THE ULTIMATE KARAOKE ENGINE (MUSIC)
 # ==========================================
 
+# Ensure Deno JS runtime is always in PATH for yt-dlp EJS challenge solving
+deno_bin_dir = os.path.expanduser("~/.deno/bin")
+if deno_bin_dir not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = f"{deno_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
 ytdl_format_options = {
-    'format': 'm4a/bestaudio/best', # 🟢 Bulletproof format fallback (Prefers Discord-friendly M4A/Opus)
+    'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
+    'quiet': False,          # 🟢 Kept False so any EJS/cookie warning is visible in Ubuntu console
+    'no_warnings': False,
+    'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'cookiefile': 'cookies.txt',    # 🟢 Cookies
-    'extractor_args': {             # 🟢 MOBILE SPOOFING
-        'youtube': {
-            'client': ['ANDROID_MUSIC', 'ANDROID', 'WEB']
-        }
-    }
+    'cookiefile': 'cookies.txt',
+    'remote_components': ['ejs:github'] # 🟢 Auto-fetches latest EJS challenge scripts if YouTube updates
 }
 
 ffmpeg_options = {
