@@ -4265,7 +4265,7 @@ async def heal_vault(interaction: discord.Interaction):
 # ==========================================
 
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    'format': 'm4a/bestaudio/best', # 🟢 Bulletproof format fallback (Prefers Discord-friendly M4A/Opus)
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
@@ -4276,7 +4276,12 @@ ytdl_format_options = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    'cookiefile': 'cookies.txt'  # 🟢 Cookies.txt file to trick YT to think a human is playing music instead of a bot
+    'cookiefile': 'cookies.txt',    # 🟢 Cookies
+    'extractor_args': {             # 🟢 MOBILE SPOOFING
+        'youtube': {
+            'client': ['ANDROID_MUSIC', 'ANDROID', 'WEB']
+        }
+    }
 }
 
 ffmpeg_options = {
