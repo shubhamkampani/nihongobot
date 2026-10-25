@@ -4276,12 +4276,7 @@ ytdl_format_options = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    # 🟢 BYPASS: Tricks YouTube into thinking this is an Android Music App
-    'extractor_args': {
-        'youtube': {
-            'client': ['ANDROID_MUSIC', 'ANDROID', 'WEB']
-        }
-    }
+    'cookiefile': 'cookies.txt'  # 🟢 Cookies.txt file to trick YT to think a human is playing music instead of a bot
 }
 
 ffmpeg_options = {
