@@ -4275,7 +4275,13 @@ ytdl_format_options = {
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
-    'source_address': '0.0.0.0'
+    'source_address': '0.0.0.0',
+    # 🟢 BYPASS: Tricks YouTube into thinking this is an Android Music App
+    'extractor_args': {
+        'youtube': {
+            'client': ['ANDROID_MUSIC', 'ANDROID', 'WEB']
+        }
+    }
 }
 
 ffmpeg_options = {
@@ -4621,13 +4627,13 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
         await interaction.edit_original_response(content=f"❌ Error finding song: {e}")
 
 @bot.tree.command(name="music", description="Play high-quality music or search a song (Learning prioritized over Karaoke).")
-@discord.app_commands.describe(query="Song name, YouTube link, or Spotify track link")
-async def music_cmd(interaction: discord.Interaction, query: str):
-    await execute_music_command(interaction, query)
+@discord.app_commands.describe(song_or_link="Song name, YouTube link, or Spotify track link or Apple-Music track link")")
+async def music_cmd(interaction: discord.Interaction, song_or_link: str):
+    await execute_music_command(interaction, song_or_link)
 
 @bot.tree.command(name="ongaku", description="Play high-quality music or search a song (Alias for /music).")
-@discord.app_commands.describe(query="Song name, YouTube link, or Spotify track link")
-async def ongaku_cmd(interaction: discord.Interaction, query: str):
-    await execute_music_command(interaction, query)
+@discord.app_commands.describe(song_or_link="Song name, YouTube link, or Spotify track link or Apple-Music track link")")
+async def ongaku_cmd(interaction: discord.Interaction, song_or_link: str):
+    await execute_music_command(interaction, song_or_link)
     
 bot.run(os.environ.get("BOT_TOKEN"))
