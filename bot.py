@@ -4622,7 +4622,7 @@ class MusicDeckView(View):
             try: await interaction.message.delete()
             except: pass
 
-    @discord.ui.button(label="<a:arrowup:1563877919506571365> VOLUME", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="<a:arrowup:1563877919506571365> VOLUME", style=discord.ButtonStyle.secondary, row=0)
     async def btn_vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
             state = music_states.get(self.guild.id)
@@ -4636,7 +4636,7 @@ class MusicDeckView(View):
                     
                 await interaction.response.send_message(f"🔊 Volume increased to **{int(state['volume']*100)}%**", ephemeral=True)
 
-    @discord.ui.button(label="<a:arrowdown:1563877916968751134> VOLUME", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="<a:arrowdown:1563877916968751134> VOLUME", style=discord.ButtonStyle.secondary, row=0)
     async def btn_vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
             state = music_states.get(self.guild.id)
