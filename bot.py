@@ -4670,7 +4670,7 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
         state["queue"].append(song)
         
         if total_study == 0:
-            await interaction.edit_original_response(content=f"<a:recordplayer:1563871425603834026> Added to queue: **{song['title']}**", ephemeral=True)
+            await interaction.edit_original_response(content=f"<a:recordplayer:1563871425603834026> Added to queue: **{song['title']}**")
             if not state.get("is_playing"):
                 asyncio.create_task(play_next_song(interaction.guild, interaction.client))
                 
