@@ -3327,13 +3327,13 @@ class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
             wait_note = "\n⏳ *Note: Sensei is finishing the current song in the music VC and will join your channel right after!*" if music_active else ""
             msg = f"✅ **Session Started!**\n👉 **Click here to join your private room:** {thread.mention}\n\n*Listen to Sensei in {vc_channel.mention} and send your audio in {thread.mention} only.*{wait_note}"
             await interaction.response.send_message(msg, ephemeral=True)
-            asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
+            asyncio.create_task(process_voice_queue(interaction.guild, interaction.client))
         else:
             estimated_wait = max(1, (queue_position - 1) * 10)
             msg = f"⏳ **Added to Queue (Position: {queue_position})**\n⏱️ **Estimated Wait Time:** ~{estimated_wait} minutes.\n👉 **Your private room:** {thread.mention}\n\n*Please wait in the thread for your turn.*"
             await interaction.response.send_message(msg, ephemeral=True)
             if not shadow_processing.get(guild_id, False):
-                asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
+                asyncio.create_task(process_voice_queue(interaction.guild, interaction.client))
 
 class PersistentShadowPanelView(View):
     def __init__(self):
@@ -4394,13 +4394,18 @@ async def play_next_song(guild, client):
 
 async def prefetch_and_translate_lyrics(song, text_ch):
     try:
-        # Fetch LRC
-        lrc_data = await asyncio.to_thread(syncedlyrics.search, song["title"])
+        import re
+        clean_title = re.sub(r'[\(\[].*?[\)\]]', '', song["title"]).strip()
+        
+        # 1. Search only in authentic global database
+        lrc_data = await asyncio.to_thread(syncedlyrics.search, clean_title)
+        
         if not lrc_data:
-            song["lyrics_cache"] = "NOT_FOUND"
+            # 🟢 No fake lyrics. Just set error and exit.
+            song["lyrics_cache"] = "ERROR"
             return
             
-        # Send raw LRC to Gemini to get translations
+        # 2. Only translate if authentic LRC is found
         prompt = (
             f"Here is a timestamped LRC lyrics file. Translate the lyrics line-by-line.\n"
             f"RULES:\n"
@@ -4409,17 +4414,16 @@ async def prefetch_and_translate_lyrics(song, text_ch):
             f"   [Original Timestamp] Original lyrics\n"
             f"   [Original Timestamp] 100% Hiragana/Katakana translation (NO KANJI ALLOWED)\n"
             f"   [Original Timestamp] Romaji reading of the Japanese translation\n\n"
-            f"LRC Data (First 1500 chars to avoid overload):\n{lrc_data[:1500]}"
+            f"LRC Data (First 1500 chars):\n{lrc_data[:1500]}"
         )
+
         raw_text = await generate_gemini_response(prompt)
-        # Parse into memory
-        parsed_lyrics = []
-        for line in raw_text.split('\n'):
-            if line.startswith('['):
-                # Basic parsing logic for live scrolling
-                parsed_lyrics.append(line) 
-        song["lyrics_cache"] = parsed_lyrics
-    except Exception:
+        
+        parsed_lyrics = [line for line in raw_text.split('\n') if line.startswith('[')]
+        song["lyrics_cache"] = parsed_lyrics if parsed_lyrics else "ERROR"
+            
+    except Exception as e:
+        print(f"Lyrics Engine Error: {e}")
         song["lyrics_cache"] = "ERROR"
 
 
@@ -4605,7 +4609,7 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
             f"I have added your song to the queue. I will ping you here automatically when the study session ends!"
         )
     else:
-        await interaction.followup.send(f"🔎 Searching for: **{query}**...")
+        await interaction.followup.send(f"<a:search:1563865869698863215> 調べるので、ちょと待ってください: **{query}**...", ephemeral=True)
 
     try:
         data = await asyncio.to_thread(lambda: ytdl.extract_info(f"ytsearch:{query}", download=False))
@@ -4630,7 +4634,7 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
         state["queue"].append(song)
         
         if total_study == 0:
-            await interaction.edit_original_response(content=f"✅ Added to queue: **{song['title']}**")
+            await interaction.edit_original_response(content=f"✅ Added to queue: **{song['title']}**", ephemeral=True)
             if not state.get("is_playing"):
                 asyncio.create_task(play_next_song(interaction.guild, interaction.client))
                 
