@@ -4372,16 +4372,37 @@ async def play_next_song(guild, client):
         except Exception as e: print(f"Error playing next: {e}")
 
     try:
-        # 🟢 THE 403 FORBIDDEN FIX: Pass yt-dlp's human headers to FFmpeg
+        # 🟢 THE 403 FORBIDDEN FIX: Pass human headers + COOKIES to FFmpeg
         current_opts = {
             'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
             'options': '-vn'
         }
+        
+        headers_str = ""
         if "http_headers" in song:
-            headers_str = ""
             for k, v in song["http_headers"].items():
-                headers_str += f"{k}: {v}\r\n"
-            current_opts['before_options'] += f' -headers "{headers_str}"'
+                if k.lower() != "cookie":
+                    headers_str += f"{k}: {v}\r\n"
+                    
+        # Inject standard Referer just to be safe
+        if "Referer" not in headers_str:
+            headers_str += "Referer: https://www.youtube.com/\r\n"
+            
+        # 🟢 THE MISSING PIECE: Read cookies.txt and give it to FFmpeg
+        try:
+            c_str = ""
+            with open("cookies.txt", "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.startswith("#") and line.strip():
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 7:
+                            c_str += f"{parts[5]}={parts[6]}; "
+            if c_str:
+                headers_str += f"Cookie: {c_str}\r\n"
+        except Exception as e:
+            print(f"Cookie injection error: {e}")
+
+        current_opts['before_options'] += f' -headers "{headers_str}"'
 
         audio_source = discord.FFmpegPCMAudio(song["url"], **current_opts)
         
@@ -4517,11 +4538,6 @@ class MusicDeckView(View):
         embed = discord.Embed(title="🎶 Current Queue", description=q_text, color=0x39ff14)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="BACK", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.check_dj_lock(interaction):
-            await interaction.response.send_message("⏪ Back feature coming soon!", ephemeral=True)
-
     @discord.ui.button(label="PAUSE/RESUME", style=discord.ButtonStyle.secondary, row=0)
     async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
@@ -4606,10 +4622,33 @@ class MusicDeckView(View):
             try: await interaction.message.delete()
             except: pass
 
-    @discord.ui.button(label="FORWARD", style=discord.ButtonStyle.secondary, row=1)
-    async def btn_fwd(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="<a:arrowup:1563877919506571365> VOLUME", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
-            await interaction.response.send_message("⏩ Forward (+10s) feature coming soon via FFmpeg!", ephemeral=True)
+            state = music_states.get(self.guild.id)
+            if state:
+                # Max Volume 200%
+                state["volume"] = min(2.0, state.get("volume", 1.0) + 0.2) 
+                # INCREASE VOLUME OF LIVE SONG
+                vc_client = state.get("vc_client")
+                if vc_client and vc_client.source:
+                    vc_client.source.volume = state["volume"]
+                    
+                await interaction.response.send_message(f"🔊 Volume increased to **{int(state['volume']*100)}%**", ephemeral=True)
+
+    @discord.ui.button(label="<a:arrowdown:1563877916968751134> VOLUME", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            state = music_states.get(self.guild.id)
+            if state:
+                # Minimum 10% volume
+                state["volume"] = max(0.1, state.get("volume", 1.0) - 0.2) 
+                # DECREASE VOLUME OF LIVE SONG
+                vc_client = state.get("vc_client")
+                if vc_client and vc_client.source:
+                    vc_client.source.volume = state["volume"]
+                    
+                await interaction.response.send_message(f"🔉 Volume decreased to **{int(state['volume']*100)}%**", ephemeral=True)
 
     @discord.ui.button(label="REPLAY", style=discord.ButtonStyle.secondary, row=1)
     async def btn_replay(self, interaction: discord.Interaction, button: discord.ui.Button):
