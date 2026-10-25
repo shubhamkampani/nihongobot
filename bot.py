@@ -1057,6 +1057,9 @@ class QuizSelectionView(View):
                     "env": self.env
                 }
                 
+                voice_tasks[guild_id].append({"type": "listening", "data": task_data})
+                queue_position = len(voice_tasks[guild_id])
+                
                 # 🟢 Check if Music is currently playing and trigger study priority pre-emption
                 music_active = await notify_music_preemption(i.guild, i.user, "Listening Practice")
                 
@@ -4151,12 +4154,13 @@ async def update_bot(interaction: discord.Interaction):
             "SpeechRecognition", 
             "flask",
             "pytz",
-            "yt-dlp",
+            "yt-dlp[default]",
+            "yt-dlp-ejs",
             "syncedlyrics"
         ]
         
-        # Run pip upgrade for all packages at once
-        command = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages_to_update
+        # Run pip upgrade with --pre so yt-dlp and yt-dlp-ejs always get latest challenge solvers
+        command = [sys.executable, "-m", "pip", "install", "--upgrade", "--pre"] + packages_to_update
         result = subprocess.run(command, capture_output=True, text=True)
         
         if result.returncode == 0:
@@ -4297,17 +4301,18 @@ ytdl_format_options = {
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'logtostderr': False,
-    'quiet': False,          # 🟢 Kept False so any EJS/cookie warning is visible in Ubuntu console
+    'quiet': False,
     'no_warnings': False,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
-    'remote_components': ['ejs:github'] # 🟢 Auto-fetches latest EJS challenge scripts if YouTube updates
-}
-
-ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
+    'remote_components': ['ejs:github'],
+    # 🟢 Exclude web_embedded so YouTube never serves poisoned c=WEB_EMBEDDED_PLAYER URLs
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['tv', 'ios', 'mweb', 'web']
+        }
+    }
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -4316,6 +4321,7 @@ async def play_next_song(guild, client):
     state = music_states.get(guild.id)
     if not state or not state.get("queue"):
         if state:
+            state["is_playing"] = False
             # 🟢 Delete music deck as soon as queue ends
             if state.get("deck_msg"):
                 try: 
@@ -4372,37 +4378,14 @@ async def play_next_song(guild, client):
         except Exception as e: print(f"Error playing next: {e}")
 
     try:
-        # 🟢 THE 403 FORBIDDEN FIX: Pass human headers + COOKIES to FFmpeg
+        # 🟢 CLEAN FFMPEG STREAMING OPTIONS (Supports both direct HTTPS & HLS m3u8 without 403)
+        ua = song.get("http_headers", {}).get("User-Agent", "Mozilla/5.0")
+        ua = ua.replace('"', '')
+        
         current_opts = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "{ua}"',
             'options': '-vn'
         }
-        
-        headers_str = ""
-        if "http_headers" in song:
-            for k, v in song["http_headers"].items():
-                if k.lower() != "cookie":
-                    headers_str += f"{k}: {v}\r\n"
-                    
-        # Inject standard Referer just to be safe
-        if "Referer" not in headers_str:
-            headers_str += "Referer: https://www.youtube.com/\r\n"
-            
-        # 🟢 THE MISSING PIECE: Read cookies.txt and give it to FFmpeg
-        try:
-            c_str = ""
-            with open("cookies.txt", "r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.startswith("#") and line.strip():
-                        parts = line.strip().split("\t")
-                        if len(parts) >= 7:
-                            c_str += f"{parts[5]}={parts[6]}; "
-            if c_str:
-                headers_str += f"Cookie: {c_str}\r\n"
-        except Exception as e:
-            print(f"Cookie injection error: {e}")
-
-        current_opts['before_options'] += f' -headers "{headers_str}"'
 
         audio_source = discord.FFmpegPCMAudio(song["url"], **current_opts)
         
@@ -4410,13 +4393,13 @@ async def play_next_song(guild, client):
         audio_source = discord.PCMVolumeTransformer(audio_source, volume=state.get("volume", 1.0))
         vc_client.play(audio_source, after=after_playing)
         
-        # 3. 🟢 NEON GREEN MUSIC DECK (Emoji idhar description mein lagaya hai)
+        # 3. 🟢 NEON GREEN MUSIC DECK
         embed = discord.Embed(
-            title=f"Now Playing", 
+            title="Now Playing", 
             description=f"<a:spinningdisc:1563646264237625524> **[{song['title']}]({song['webpage_url']})**\n00:00 / {song['duration_str']} • [{requester.mention}]\nSong By: {song.get('uploader', 'Unknown')}", 
             color=0x39ff14 
         )
-        embed.set_author(name=f"DJ 司会者")
+        embed.set_author(name="DJ 司会者")
         
         if song.get("thumbnail"):
             embed.set_thumbnail(url=song["thumbnail"])
@@ -4433,7 +4416,7 @@ async def play_next_song(guild, client):
         deck_msg = await text_ch.send(embed=embed, view=deck_view)
         state["deck_msg"] = deck_msg
         
-        # 4. 🟢 BACKGROUND LYRICS PRE-FETCHER (Solves Flaw #4)
+        # 4. 🟢 BACKGROUND LYRICS PRE-FETCHER
         asyncio.create_task(prefetch_and_translate_lyrics(song, text_ch))
         
     except Exception as e:
@@ -4450,8 +4433,7 @@ async def prefetch_and_translate_lyrics(song, text_ch):
         lrc_data = await asyncio.to_thread(syncedlyrics.search, clean_title)
         
         if not lrc_data:
-            # 🟢 No fake lyrics. Just set error and exit.
-            song["lyrics_cache"] = "ERROR"
+            song["lyrics_cache"] = "NOT_FOUND"
             return
             
         # 2. Only translate if authentic LRC is found
@@ -4489,7 +4471,7 @@ class LiveLyricsView(View):
         if not isinstance(lyrics_data, list):
             return await interaction.response.send_message("❌ Lyrics are still processing or not found.", ephemeral=True)
             
-        full_text = "\n".join(lyrics_data[:50]) # Truncate if too long
+        full_text = "\n".join(lyrics_data[:50])
         embed = discord.Embed(title=f"📜 {self.song['title']} (Static Lyrics)", description=full_text, color=0x39ff14)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -4500,7 +4482,6 @@ class LiveLyricsView(View):
             return await interaction.response.send_message("❌ Cannot extract vocabulary from missing lyrics.", ephemeral=True)
             
         source_text = "\n".join(lyrics_data)
-        # 🟢 Using our Universal Extractor from Part 1
         await trigger_universal_vocab_extractor(interaction, source_text, self.song['title'])
 
 
@@ -4524,7 +4505,7 @@ class MusicDeckView(View):
             return False
         return True
 
-    # ROW 1
+    # ROW 0 (5 Buttons)
     @discord.ui.button(label="QUEUE", style=discord.ButtonStyle.secondary, row=0)
     async def btn_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = music_states.get(self.guild.id)
@@ -4556,19 +4537,43 @@ class MusicDeckView(View):
             state = music_states.get(self.guild.id)
             vc_client = state.get("vc_client")
             if vc_client:
-                vc_client.stop() # Triggers after_playing to load next song
+                vc_client.stop()
                 await interaction.response.send_message("⏭️ Song Skipped.", ephemeral=True)
 
+    # 🟢 FIXED ANIMATED EMOJIS USING emoji= PARAMETER
+    @discord.ui.button(label="VOLUME", emoji="<a:arrowup:1563877919506571365>", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            state = music_states.get(self.guild.id)
+            if state:
+                state["volume"] = min(2.0, state.get("volume", 1.0) + 0.2) 
+                vc_client = state.get("vc_client")
+                if vc_client and vc_client.source:
+                    vc_client.source.volume = state["volume"]
+                    
+                await interaction.response.send_message(f"🔊 Volume increased to **{int(state['volume']*100)}%**", ephemeral=True)
+
+    @discord.ui.button(label="VOLUME", emoji="<a:arrowdown:1563877916968751134>", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            state = music_states.get(self.guild.id)
+            if state:
+                state["volume"] = max(0.1, state.get("volume", 1.0) - 0.2) 
+                vc_client = state.get("vc_client")
+                if vc_client and vc_client.source:
+                    vc_client.source.volume = state["volume"]
+                    
+                await interaction.response.send_message(f"🔉 Volume decreased to **{int(state['volume']*100)}%**", ephemeral=True)
+
+    # ROW 1 (5 Buttons)
     @discord.ui.button(label="AUTOPLAY", style=discord.ButtonStyle.secondary, row=1)
     async def btn_autoplay(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
             await interaction.response.send_message("🤖 Autoplay toggled (Feature coming soon)!", ephemeral=True)
 
-    # ROW 2
     @discord.ui.button(label="LOOP", style=discord.ButtonStyle.secondary, row=1)
     async def btn_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
-            # 🟢 SAFETY LOCK: Check if any learning session is active
             _, s_count, total_study = get_study_queue_counts(self.guild.id)
             if total_study > 0 or shadow_processing.get(self.guild.id, False) or voice_processing.get(self.guild.id, False):
                 return await interaction.response.send_message(
@@ -4583,7 +4588,6 @@ class MusicDeckView(View):
 
     @discord.ui.button(label="LYRICS", style=discord.ButtonStyle.primary, row=1)
     async def btn_lyrics(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Open to everyone!
         state = music_states.get(self.guild.id)
         if not state or not state.get("current_song"):
             return await interaction.response.send_message("❌ No music playing.", ephemeral=True)
@@ -4598,7 +4602,6 @@ class MusicDeckView(View):
         elif cache == "ERROR":
             return await interaction.response.send_message("❌ AI Translation engine failed. Please try again later.", ephemeral=True)
             
-        # 🟢 Send Live Karaoke Box
         embed = discord.Embed(
             title=f"🎤 Live Karaoke: {song['title']}", 
             description="```Live scrolling starting...```", 
@@ -4621,34 +4624,6 @@ class MusicDeckView(View):
             await interaction.response.send_message("⏹️ Music stopped and queue cleared.", ephemeral=True)
             try: await interaction.message.delete()
             except: pass
-
-    @discord.ui.button(label="<a:arrowup:1563877919506571365> VOLUME", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.check_dj_lock(interaction):
-            state = music_states.get(self.guild.id)
-            if state:
-                # Max Volume 200%
-                state["volume"] = min(2.0, state.get("volume", 1.0) + 0.2) 
-                # INCREASE VOLUME OF LIVE SONG
-                vc_client = state.get("vc_client")
-                if vc_client and vc_client.source:
-                    vc_client.source.volume = state["volume"]
-                    
-                await interaction.response.send_message(f"🔊 Volume increased to **{int(state['volume']*100)}%**", ephemeral=True)
-
-    @discord.ui.button(label="<a:arrowdown:1563877916968751134> VOLUME", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.check_dj_lock(interaction):
-            state = music_states.get(self.guild.id)
-            if state:
-                # Minimum 10% volume
-                state["volume"] = max(0.1, state.get("volume", 1.0) - 0.2) 
-                # DECREASE VOLUME OF LIVE SONG
-                vc_client = state.get("vc_client")
-                if vc_client and vc_client.source:
-                    vc_client.source.volume = state["volume"]
-                    
-                await interaction.response.send_message(f"🔉 Volume decreased to **{int(state['volume']*100)}%**", ephemeral=True)
 
     @discord.ui.button(label="REPLAY", style=discord.ButtonStyle.secondary, row=1)
     async def btn_replay(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4681,29 +4656,59 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
     if total_study > 0:
         await interaction.followup.send(
             f"⏳ **Learning First!** There are currently **{total_study} users** in the Listening/Shadow queue.\n"
-            f"I have added your song to the queue. I will ping you here automatically when the study session ends!"
+            f"I have added your song to the queue. I will ping you here automatically when the study session ends!",
+            ephemeral=True
         )
     else:
         await interaction.followup.send(f"<a:search:1563865869698863215> 調べるので、ちょと待ってください: **{query}**...", ephemeral=True)
 
     try:
-        data = await asyncio.to_thread(lambda: ytdl.extract_info(f"ytsearch:{query}", download=False))
+        search_target = query if query.startswith(("http://", "https://")) else f"ytsearch:{query}"
+        data = await asyncio.to_thread(lambda: ytdl.extract_info(search_target, download=False))
         if 'entries' in data:
             data = data['entries'][0]
             
         mins, secs = divmod(data.get('duration', 0), 60)
         
+        # 🟢 SMART STREAM SELECTOR: Filter out poisoned 'siu=1' & 'WEB_EMBEDDED_PLAYER' URLs
+        stream_url = data.get('url')
+        stream_headers = data.get('http_headers', {})
+        
+        formats = data.get('formats', [])
+        if formats:
+            clean_audio = []
+            clean_muxed = []
+            for f in formats:
+                f_url = f.get('url', '')
+                if not f_url or 'siu=1' in f_url or 'c=WEB_EMBEDDED_PLAYER' in f_url:
+                    continue
+                if f.get('acodec') != 'none':
+                    if f.get('vcodec') == 'none':
+                        clean_audio.append(f)
+                    else:
+                        clean_muxed.append(f)
+                        
+            chosen_fmt = None
+            if clean_audio:
+                chosen_fmt = clean_audio[-1] # Best clean audio-only stream
+            elif clean_muxed:
+                chosen_fmt = clean_muxed[-1] # Best clean HLS (m3u8) / muxed stream
+                
+            if chosen_fmt:
+                stream_url = chosen_fmt.get('url')
+                stream_headers = chosen_fmt.get('http_headers') or stream_headers
+        
         song = {
             "title": data.get('title'),
             "webpage_url": data.get('webpage_url'),
-            "url": data.get('url'),
+            "url": stream_url,
             "thumbnail": data.get('thumbnail'),
             "duration": data.get('duration', 0),
             "duration_str": f"{mins:02d}:{secs:02d}",
             "uploader": data.get('uploader'),
             "requester": interaction.user,
             "vc": vc,
-            "http_headers": data.get('http_headers', {}) # 🟢 Human headers so that ffmpeg can pretend being human
+            "http_headers": stream_headers
         }
         
         state["queue"].append(song)
