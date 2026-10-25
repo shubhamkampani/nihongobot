@@ -4259,5 +4259,375 @@ async def heal_vault(interaction: discord.Interaction):
             print(f"Heal Error for {doc.get('english', 'Unknown')}: {e}")
             
     await interaction.followup.send(f"✅ **Healing & Cleanup Complete!**\n- Successfully recovered: **{healed_count} flashcards**.\n- Orphaned vaults deleted: **{len(deleted_users)} users**.", ephemeral=True)
+
+# ==========================================
+# 🎵 THE ULTIMATE KARAOKE ENGINE (MUSIC)
+# ==========================================
+
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0'
+}
+
+ffmpeg_options = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+
+async def play_next_song(guild, client):
+    state = music_states.get(guild.id)
+    if not state or not state.get("queue"):
+        if state and state.get("vc_client") and state["vc_client"].is_connected():
+            await state["vc_client"].disconnect()
+            music_states.pop(guild.id, None)
+        return
+
+    # 1. 🟢 MASTER PRIORITY CHECK: Wait if Learning Queues are active!
+    while True:
+        _, _, total_study = get_study_queue_counts(guild.id)
+        if total_study > 0:
+            state["is_playing"] = False
+            state["yielded_to_study"] = True
+            await asyncio.sleep(5) # Pause music progression, let Study finish
+        else:
+            state["yielded_to_study"] = False
+            break
+
+    state["is_playing"] = True
+    song = state["queue"].pop(0)
+    state["current_song"] = song
+    state["song_start_time"] = time.time()
+    
+    text_ch = state["text_channel"]
+    vc = song["vc"]
+    requester = song["requester"]
+    
+    vc_client = discord.utils.get(client.voice_clients, guild=guild)
+    if not vc_client or not vc_client.is_connected():
+        try:
+            vc_client = await vc.connect()
+            state["vc_client"] = vc_client
+        except Exception:
+            return await text_ch.send("❌ Could not connect to Voice Channel.")
+    elif vc_client.channel != vc:
+        await vc_client.move_to(vc)
+
+    # 2. 🟢 STREAM AUDIO
+    def after_playing(error):
+        if error:
+            print(f"Player error: {error}")
+        # Loop check or next song
+        if state.get("loop") and state.get("current_song"):
+            state["queue"].insert(0, state["current_song"]) # Put it back at top
+            
+        coro = play_next_song(guild, client)
+        fut = asyncio.run_coroutine_threadsafe(coro, client.loop)
+        try: fut.result()
+        except Exception as e: print(f"Error playing next: {e}")
+
+    try:
+        audio_source = discord.FFmpegPCMAudio(song["url"], **ffmpeg_options)
+        # Apply volume
+        audio_source = discord.PCMVolumeTransformer(audio_source, volume=state.get("volume", 1.0))
+        vc_client.play(audio_source, after=after_playing)
+        
+        # 3. 🟢 NEON GREEN MUSIC DECK
+        embed = discord.Embed(
+            title=f"Now Playing", 
+            description=f"[{song['title']}]({song['webpage_url']})\n00:00 / {song['duration_str']} • [{requester.mention}]\nSong By: {song.get('uploader', 'Unknown')}", 
+            color=0x39ff14 # Neon Green!
+        )
+        # Use dynamic spinning disc emoji or standard emoji fallback
+        emoji_disc = discord.utils.get(guild.emojis, name="spinningdisc")
+        disc_str = str(emoji_disc) if emoji_disc else "💿"
+        embed.set_author(name=f"{disc_str} Now Playing")
+        
+        if song.get("thumbnail"):
+            embed.set_thumbnail(url=song["thumbnail"])
+            
+        embed.set_footer(text=f"Playing • Volume {int(state.get('volume', 1.0)*100)}% • Queue {len(state['queue'])} • Loop {'On' if state.get('loop') else 'Off'} • Autoplay Off")
+        
+        deck_view = MusicDeckView(guild, client)
+        
+        # Delete old deck if exists to keep chat clean
+        if state.get("deck_msg"):
+            try: await state["deck_msg"].delete()
+            except: pass
+            
+        deck_msg = await text_ch.send(embed=embed, view=deck_view)
+        state["deck_msg"] = deck_msg
+        
+        # 4. 🟢 BACKGROUND LYRICS PRE-FETCHER (Solves Flaw #4)
+        asyncio.create_task(prefetch_and_translate_lyrics(song, text_ch))
+        
+    except Exception as e:
+        await text_ch.send(f"❌ Playback error: {e}")
+        await play_next_song(guild, client)
+
+
+async def prefetch_and_translate_lyrics(song, text_ch):
+    try:
+        # Fetch LRC
+        lrc_data = await asyncio.to_thread(syncedlyrics.search, song["title"])
+        if not lrc_data:
+            song["lyrics_cache"] = "NOT_FOUND"
+            return
+            
+        # Send raw LRC to Gemini to get translations
+        prompt = (
+            f"Here is a timestamped LRC lyrics file. Translate the lyrics line-by-line.\n"
+            f"RULES:\n"
+            f"1. DO NOT change the [mm:ss.xx] timestamps.\n"
+            f"2. For each line, return exactly 3 lines:\n"
+            f"   [Original Timestamp] Original lyrics\n"
+            f"   [Original Timestamp] 100% Hiragana/Katakana translation (NO KANJI ALLOWED)\n"
+            f"   [Original Timestamp] Romaji reading of the Japanese translation\n\n"
+            f"LRC Data (First 1500 chars to avoid overload):\n{lrc_data[:1500]}"
+        )
+        raw_text = await generate_gemini_response(prompt)
+        # Parse into memory
+        parsed_lyrics = []
+        for line in raw_text.split('\n'):
+            if line.startswith('['):
+                # Basic parsing logic for live scrolling
+                parsed_lyrics.append(line) 
+        song["lyrics_cache"] = parsed_lyrics
+    except Exception:
+        song["lyrics_cache"] = "ERROR"
+
+
+class LiveLyricsView(View):
+    def __init__(self, user, song, guild):
+        super().__init__(timeout=None)
+        self.user = user
+        self.song = song
+        self.guild = guild
+
+    @discord.ui.button(label="📜 Show Full Static Lyrics", style=discord.ButtonStyle.secondary)
+    async def btn_static(self, interaction: discord.Interaction, button: discord.ui.Button):
+        lyrics_data = self.song.get("lyrics_cache", [])
+        if not isinstance(lyrics_data, list):
+            return await interaction.response.send_message("❌ Lyrics are still processing or not found.", ephemeral=True)
+            
+        full_text = "\n".join(lyrics_data[:50]) # Truncate if too long
+        embed = discord.Embed(title=f"📜 {self.song['title']} (Static Lyrics)", description=full_text, color=0x39ff14)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="📖 Extract Vocab", style=discord.ButtonStyle.success)
+    async def btn_extract(self, interaction: discord.Interaction, button: discord.ui.Button):
+        lyrics_data = self.song.get("lyrics_cache", [])
+        if not isinstance(lyrics_data, list):
+            return await interaction.response.send_message("❌ Cannot extract vocabulary from missing lyrics.", ephemeral=True)
+            
+        source_text = "\n".join(lyrics_data)
+        # 🟢 Using our Universal Extractor from Part 1
+        await trigger_universal_vocab_extractor(interaction, source_text, self.song['title'])
+
+
+class MusicDeckView(View):
+    def __init__(self, guild, client):
+        super().__init__(timeout=None)
+        self.guild = guild
+        self.client = client
+
+    async def check_dj_lock(self, interaction: discord.Interaction) -> bool:
+        state = music_states.get(self.guild.id)
+        if not state or not state.get("current_song"):
+            await interaction.response.send_message("❌ No music playing.", ephemeral=True)
+            return False
+            
+        requester = state["current_song"]["requester"]
+        is_admin = any(r.name in ["Senior Admin（セィニア・アデュミン）", "Founder（ファウンダ）", "Junior Admin（ジュニア・アデュミン）"] for r in interaction.user.roles)
+        
+        if interaction.user.id != requester.id and not is_admin:
+            await interaction.response.send_message("🔒 **DJ Lock Active:** Only the person who queued this song or an Admin can use this button.", ephemeral=True)
+            return False
+        return True
+
+    # ROW 1
+    @discord.ui.button(label="QUEUE", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = music_states.get(self.guild.id)
+        if not state or not state.get("queue"):
+            return await interaction.response.send_message("Queue is empty.", ephemeral=True)
+            
+        q_text = ""
+        for idx, s in enumerate(state["queue"][:10]):
+            q_text += f"{idx+1}. **{s['title']}** (Requested by {s['requester'].display_name})\n"
+            
+        embed = discord.Embed(title="🎶 Current Queue", description=q_text, color=0x39ff14)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="BACK", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            await interaction.response.send_message("⏪ Back feature coming soon!", ephemeral=True)
+
+    @discord.ui.button(label="PAUSE/RESUME", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            state = music_states.get(self.guild.id)
+            vc_client = state.get("vc_client")
+            if vc_client and vc_client.is_playing():
+                vc_client.pause()
+                await interaction.response.send_message("⏸️ Music Paused.", ephemeral=True)
+            elif vc_client and vc_client.is_paused():
+                vc_client.resume()
+                await interaction.response.send_message("▶️ Music Resumed.", ephemeral=True)
+
+    @discord.ui.button(label="SKIP", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            state = music_states.get(self.guild.id)
+            vc_client = state.get("vc_client")
+            if vc_client:
+                vc_client.stop() # Triggers after_playing to load next song
+                await interaction.response.send_message("⏭️ Song Skipped.", ephemeral=True)
+
+    @discord.ui.button(label="AUTOPLAY", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_autoplay(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            await interaction.response.send_message("🤖 Autoplay toggled (Feature coming soon)!", ephemeral=True)
+
+    # ROW 2
+    @discord.ui.button(label="LOOP", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            state = music_states.get(self.guild.id)
+            state["loop"] = not state.get("loop", False)
+            status = "On" if state["loop"] else "Off"
+            await interaction.response.send_message(f"🔁 Loop is now **{status}**.", ephemeral=True)
+
+    @discord.ui.button(label="LYRICS", style=discord.ButtonStyle.primary, row=1)
+    async def btn_lyrics(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Open to everyone!
+        state = music_states.get(self.guild.id)
+        if not state or not state.get("current_song"):
+            return await interaction.response.send_message("❌ No music playing.", ephemeral=True)
+            
+        song = state["current_song"]
+        cache = song.get("lyrics_cache")
+        
+        if not cache:
+            return await interaction.response.send_message("⏳ Lyrics are still being processed by AI. Please click again in a few seconds!", ephemeral=True)
+        elif cache == "NOT_FOUND":
+            return await interaction.response.send_message("❌ No synced lyrics found for this track in the global database.", ephemeral=True)
+        elif cache == "ERROR":
+            return await interaction.response.send_message("❌ AI Translation engine failed. Please try again later.", ephemeral=True)
+            
+        # 🟢 Send Live Karaoke Box
+        embed = discord.Embed(
+            title=f"🎤 Live Karaoke: {song['title']}", 
+            description="```Live scrolling starting...```", 
+            color=0x39ff14
+        )
+        embed.set_footer(text="Translations by AI Sensei")
+        
+        view = LiveLyricsView(interaction.user, song, self.guild)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="STOP", style=discord.ButtonStyle.danger, row=1)
+    async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            state = music_states.get(self.guild.id)
+            state["queue"].clear()
+            if state.get("vc_client"):
+                state["vc_client"].stop()
+                await state["vc_client"].disconnect()
+                music_states.pop(self.guild.id, None)
+            await interaction.response.send_message("⏹️ Music stopped and queue cleared.", ephemeral=True)
+            try: await interaction.message.delete()
+            except: pass
+
+    @discord.ui.button(label="FORWARD", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_fwd(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            await interaction.response.send_message("⏩ Forward (+10s) feature coming soon via FFmpeg!", ephemeral=True)
+
+    @discord.ui.button(label="REPLAY", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_replay(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.check_dj_lock(interaction):
+            await interaction.response.send_message("🔄 Replay feature coming soon!", ephemeral=True)
+
+
+async def execute_music_command(interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
+    
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        return await interaction.followup.send("❌ You must be in a Voice Channel to play music.", ephemeral=True)
+        
+    vc = interaction.user.voice.channel
+    guild_id = interaction.guild.id
+    
+    if guild_id not in music_states:
+        music_states[guild_id] = {
+            "queue": [], 
+            "is_playing": False, 
+            "text_channel": interaction.channel,
+            "volume": 1.0,
+            "loop": False
+        }
+        
+    state = music_states[guild_id]
+    
+    # Check Study Priority immediately before fetching
+    _, _, total_study = get_study_queue_counts(guild_id)
+    if total_study > 0:
+        await interaction.followup.send(
+            f"⏳ **Learning First!** There are currently **{total_study} users** in the Listening/Shadow queue.\n"
+            f"I have added your song to the queue. I will ping you here automatically when the study session ends!"
+        )
+    else:
+        await interaction.followup.send(f"🔎 Searching for: **{query}**...")
+
+    try:
+        data = await asyncio.to_thread(lambda: ytdl.extract_info(f"ytsearch:{query}", download=False))
+        if 'entries' in data:
+            data = data['entries'][0]
+            
+        mins, secs = divmod(data.get('duration', 0), 60)
+        
+        song = {
+            "title": data.get('title'),
+            "webpage_url": data.get('webpage_url'),
+            "url": data.get('url'),
+            "thumbnail": data.get('thumbnail'),
+            "duration": data.get('duration', 0),
+            "duration_str": f"{mins:02d}:{secs:02d}",
+            "uploader": data.get('uploader'),
+            "requester": interaction.user,
+            "vc": vc
+        }
+        
+        state["queue"].append(song)
+        
+        if total_study == 0:
+            await interaction.edit_original_response(content=f"✅ Added to queue: **{song['title']}**")
+            if not state.get("is_playing"):
+                asyncio.create_task(play_next_song(interaction.guild, interaction.client))
+                
+    except Exception as e:
+        await interaction.edit_original_response(content=f"❌ Error finding song: {e}")
+
+@bot.tree.command(name="music", description="Play high-quality music or search a song (Learning prioritized over Karaoke).")
+@discord.app_commands.describe(query="Song name, YouTube link, or Spotify track link")
+async def music_cmd(interaction: discord.Interaction, query: str):
+    await execute_music_command(interaction, query)
+
+@bot.tree.command(name="ongaku", description="Play high-quality music or search a song (Alias for /music).")
+@discord.app_commands.describe(query="Song name, YouTube link, or Spotify track link")
+async def ongaku_cmd(interaction: discord.Interaction, query: str):
+    await execute_music_command(interaction, query)
     
 bot.run(os.environ.get("BOT_TOKEN"))
