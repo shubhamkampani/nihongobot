@@ -4122,7 +4122,8 @@ async def update_bot(interaction: discord.Interaction):
     await interaction.followup.send("⏳ **Starting Auto-Update Protocol...**\n1️⃣ Fetching latest packages from Python Package Index...", ephemeral=True)
     
     try:
-        "edge-tts", 
+        packages_to_update = [
+            "edge-tts", 
             "discord.py", 
             "pymongo", 
             "aiohttp", 
