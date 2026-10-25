@@ -29,6 +29,8 @@ import base64 #Dependency for AI Vision (used in Vocab-Vault)
 import subprocess # This and next 2 dependency for /updatebot command
 import sys
 import os
+import yt_dlp  # 🎵 Music & Live Lyrics Dependencies
+import syncedlyrics
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -593,9 +595,84 @@ class GrammarTopicModal(discord.ui.Modal, title='Grammar Practice'):
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ Verification/Fetch Error: {e}", embed=None, view=None)
 
-# --- 🎙️ UNIVERSAL SMART VOICE QUEUE ---
+# --- 🎙️ UNIVERSAL SMART VOICE & MUSIC PRIORITY CONTROLLER ---
 voice_tasks = {} 
 voice_processing = {} 
+music_states = {} # Stores guild-level music queue, active song timestamps, and pause states
+
+def get_study_queue_counts(guild_id):
+    l_count = len(voice_tasks.get(guild_id, []))
+    s_count = len(shadow_queues.get(guild_id, [])) if 'shadow_queues' in globals() else 0
+    return l_count, s_count, (l_count + s_count)
+
+async def notify_music_preemption(guild, learner_user, study_mode_name):
+    state = music_states.get(guild.id)
+    if not state or not state.get("is_playing"):
+        return False
+        
+    state["study_interrupt"] = True
+    
+    # Calculate remaining time of current song
+    elapsed = int(time.time() - state.get("song_start_time", time.time()))
+    duration = int(state.get("current_song", {}).get("duration", 180))
+    remaining = max(5, duration - elapsed - int(state.get("seek_offset", 0)))
+    mins, secs = divmod(remaining, 60)
+    time_str = f"{mins:02d}:{secs:02d}"
+    
+    if not state.get("interrupt_notified"):
+        state["interrupt_notified"] = True
+        dj_user = state.get("current_song", {}).get("requester")
+        text_ch = state.get("text_channel")
+        if text_ch:
+            dj_ping = dj_user.mention if dj_user else "Music Listeners"
+            msg = (
+                f"📚 **Study Priority Alert!** {dj_ping}, {learner_user.mention} has requested me to help with "
+                f"**{study_mode_name}**, and here we prefer studying over karaoke! "
+                f"I'll leave the VC in **`{time_str}`** (after the current song finishes) and if there is any music queue, "
+                f"we will automatically resume right after the study session ends."
+            )
+            try:
+                await text_ch.send(msg)
+            except Exception:
+                pass
+    return True
+
+async def wait_for_music_song_to_finish(guild):
+    state = music_states.get(guild.id)
+    if not state or not state.get("is_playing"):
+        return
+    # Wait gracefully while the current song finishes playing
+    while state.get("is_playing") and not state.get("yielded_to_study"):
+        await asyncio.sleep(1)
+
+async def check_and_ping_music_waiters(guild, client):
+    state = music_states.get(guild.id)
+    if not state or not state.get("queue"):
+        return
+        
+    _, _, total_study = get_study_queue_counts(guild.id)
+    
+    # Ping music user when only 1 or 0 study sessions remain
+    if total_study <= 1 and not state.get("soon_pinged"):
+        state["soon_pinged"] = True
+        next_song = state["queue"][0]
+        requester = next_song.get("requester")
+        target_vc = next_song.get("vc") or state.get("vc_channel")
+        text_ch = state.get("text_channel")
+        if text_ch and requester and target_vc:
+            try:
+                await text_ch.send(
+                    f"🎶 **Heads up {requester.mention}!** Your music is starting soon "
+                    f"(Study queue remaining: **{total_study}**). Please join {target_vc.mention}!"
+                )
+            except Exception:
+                pass
+                
+    # If all study queues are completely empty, resume music automatically
+    if total_study == 0 and not voice_processing.get(guild.id, False) and not shadow_processing.get(guild.id, False):
+        if "start_or_resume_music" in globals():
+            asyncio.create_task(start_or_resume_music(guild, client))
+
 
 class ListeningSingleQView(View):
     def __init__(self, user, correct_ans):
@@ -611,16 +688,23 @@ class ListeningSingleQView(View):
             self.add_item(btn)
             
     async def button_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user.id: return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ Not your test!", ephemeral=True)
         self.user_choice = interaction.data['custom_id']
         self.result = (self.user_choice == self.correct_ans)
         await interaction.response.edit_message(content="✅ Answer locked! Wait for the next audio...", view=None, embed=None)
         self.stop()
 
-# 🟢 THE MASTER PROCESSOR (Handles both Listening & Shadowing seamlessly)
+
+# 🟢 THE MASTER PROCESSOR (Handles Listening & Coordinates with Shadowing + Music)
 async def process_voice_queue(guild, client):
     voice_processing[guild.id] = True
+    
+    # If music is currently playing, wait for the current song to finish before taking over VC
+    await wait_for_music_song_to_finish(guild)
+    
     while voice_tasks.get(guild.id, []):
+        await check_and_ping_music_waiters(guild, client)
         task = voice_tasks[guild.id][0]
         try:
             if task["type"] == "listening":
@@ -633,7 +717,10 @@ async def process_voice_queue(guild, client):
         if voice_tasks.get(guild.id):
             voice_tasks[guild.id].pop(0)
             
+        await check_and_ping_music_waiters(guild, client)
+            
     voice_processing[guild.id] = False
+    await check_and_ping_music_waiters(guild, client)
 
 # 🟢 1. LISTENING ENGINE (Updated Logic)
 async def execute_listening_task(guild, client, data):
@@ -970,16 +1057,28 @@ class QuizSelectionView(View):
                     "env": self.env
                 }
                 
-                voice_tasks[guild_id].append({"type": "listening", "data": task_data})
-                queue_position = len(voice_tasks[guild_id])
+                # 🟢 Check if Music is currently playing and trigger study priority pre-emption
+                music_active = await notify_music_preemption(i.guild, i.user, "Listening Practice")
                 
-                if queue_position == 1 and not voice_processing.get(guild_id, False):
-                    # We send the Ephemeral processing message here, so we can edit it later!
-                    await i.response.send_message(f"⏳ Please wait! Setting up your session...", ephemeral=True)
+                if queue_position == 1 and not voice_processing.get(guild_id, False) and not shadow_processing.get(guild_id, False):
+                    if music_active:
+                        await i.response.send_message(
+                            "⏳ **Study Priority Activated!** Sensei is finishing the current song in the music channel and will join your VC right after it ends!",
+                            ephemeral=True
+                        )
+                    else:
+                        await i.response.send_message("⏳ Please wait! Setting up your session...", ephemeral=True)
                     asyncio.create_task(process_voice_queue(i.guild, i.client))
                 else:
-                    est_wait = (queue_position - 1) * 3
-                    await i.response.send_message(f"⏳ **Added to Global Voice Queue (Position: {queue_position})**\n⏱️ **Estimated Wait Time:** ~{est_wait} minutes.\n*Sensei is assisting someone else right now. Please wait in {vc.name}.*", ephemeral=True)
+                    est_wait = max(1, (queue_position - 1) * 3)
+                    await i.response.send_message(
+                        f"⏳ **Added to Global Voice Queue (Position: {queue_position})**\n"
+                        f"⏱️ **Estimated Wait Time:** ~{est_wait} minutes.\n"
+                        f"*Sensei is assisting someone else right now. Please wait in {vc.name}.*",
+                        ephemeral=True
+                    )
+                    if not voice_processing.get(guild_id, False):
+                        asyncio.create_task(process_voice_queue(i.guild, i.client))
 
         embed = discord.Embed(title="🎧 Listening Setup", description="Customize your practice session before starting:", color=0x3498db)
         await interaction.response.send_message(embed=embed, view=ListeningOptionsView(self.user, self.level_full), ephemeral=True)
@@ -2946,10 +3045,13 @@ async def delete_thread_later(thread, delay=1200):
     try: await thread.delete()
     except: pass
 
-async def process_shadow_queue(guild, client):
-    shadow_processing[guild.id] = True
-    
+# Wait for current song to finish if music is playing, or wait if listening queue is currently active
+    await wait_for_music_song_to_finish(guild)
+    while voice_processing.get(guild.id, False):
+        await asyncio.sleep(2)
+        
     while shadow_queues.get(guild.id, []):
+        await check_and_ping_music_waiters(guild, client)
         task = shadow_queues[guild.id][0]
         interaction = task["interaction"]
         user = interaction.user
@@ -3163,8 +3265,10 @@ async def process_shadow_queue(guild, client):
         finally:
             if shadow_queues.get(guild.id):
                 shadow_queues[guild.id].pop(0)
+            await check_and_ping_music_waiters(guild, client)
                 
     shadow_processing[guild.id] = False
+    await check_and_ping_music_waiters(guild, client)
 
 
 class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
@@ -3216,13 +3320,16 @@ class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
         
         queue_position = len(shadow_queues[guild_id])
         
-        if queue_position == 1 and not shadow_processing.get(guild_id, False):
-            msg = f"✅ **Session Started!**\n👉 **Click here to join your private room:** {thread.mention}\n\n*Listen to Sensei in {vc_channel.mention} and send your audio in the {thread.mention} only.*"
+        # 🟢 Trigger Music Pre-emption if music is currently playing
+        music_active = await notify_music_preemption(interaction.guild, interaction.user, "Shadow Speaking")
+        
+        if queue_position == 1 and not shadow_processing.get(guild_id, False) and not voice_processing.get(guild_id, False):
+            wait_note = "\n⏳ *Note: Sensei is finishing the current song in the music VC and will join your channel right after!*" if music_active else ""
+            msg = f"✅ **Session Started!**\n👉 **Click here to join your private room:** {thread.mention}\n\n*Listen to Sensei in {vc_channel.mention} and send your audio in {thread.mention} only.*{wait_note}"
             await interaction.response.send_message(msg, ephemeral=True)
             asyncio.create_task(process_shadow_queue(interaction.guild, interaction.client))
         else:
-            # 🟢 DYNAMIC QUEUE TIMER ADDED
-            estimated_wait = (queue_position - 1) * 10
+            estimated_wait = max(1, (queue_position - 1) * 10)
             msg = f"⏳ **Added to Queue (Position: {queue_position})**\n⏱️ **Estimated Wait Time:** ~{estimated_wait} minutes.\n👉 **Your private room:** {thread.mention}\n\n*Please wait in the thread for your turn.*"
             await interaction.response.send_message(msg, ephemeral=True)
             if not shadow_processing.get(guild_id, False):
@@ -4015,15 +4122,16 @@ async def update_bot(interaction: discord.Interaction):
     await interaction.followup.send("⏳ **Starting Auto-Update Protocol...**\n1️⃣ Fetching latest packages from Python Package Index...", ephemeral=True)
     
     try:
-        packages_to_update = [
-            "edge-tts", 
+        "edge-tts", 
             "discord.py", 
             "pymongo", 
             "aiohttp", 
             "pydub", 
             "SpeechRecognition", 
             "flask",
-            "pytz"
+            "pytz",
+            "yt-dlp",
+            "syncedlyrics"
         ]
         
         # Run pip upgrade for all packages at once
