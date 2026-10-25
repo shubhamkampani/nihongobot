@@ -4344,21 +4344,30 @@ async def play_next_song(guild, client):
         except Exception as e: print(f"Error playing next: {e}")
 
     try:
-        audio_source = discord.FFmpegPCMAudio(song["url"], **ffmpeg_options)
+        # 🟢 THE 403 FORBIDDEN FIX: Pass yt-dlp's human headers to FFmpeg
+        current_opts = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn'
+        }
+        if "http_headers" in song:
+            headers_str = ""
+            for k, v in song["http_headers"].items():
+                headers_str += f"{k}: {v}\r\n"
+            current_opts['before_options'] += f' -headers "{headers_str}"'
+
+        audio_source = discord.FFmpegPCMAudio(song["url"], **current_opts)
+        
         # Apply volume
         audio_source = discord.PCMVolumeTransformer(audio_source, volume=state.get("volume", 1.0))
         vc_client.play(audio_source, after=after_playing)
         
-        # 3. 🟢 NEON GREEN MUSIC DECK
+        # 3. 🟢 NEON GREEN MUSIC DECK (Emoji idhar description mein lagaya hai)
         embed = discord.Embed(
             title=f"Now Playing", 
-            description=f"[{song['title']}]({song['webpage_url']})\n00:00 / {song['duration_str']} • [{requester.mention}]\nSong By: {song.get('uploader', 'Unknown')}", 
-            color=0x39ff14 # Neon Green!
+            description=f"<a:spinningdisc:1563646264237625524> **[{song['title']}]({song['webpage_url']})**\n00:00 / {song['duration_str']} • [{requester.mention}]\nSong By: {song.get('uploader', 'Unknown')}", 
+            color=0x39ff14 
         )
-        # Use dynamic spinning disc emoji or standard emoji fallback
-        emoji_disc = discord.utils.get(guild.emojis, name="spinningdisc")
-        disc_str = str(emoji_disc) if emoji_disc else "💿"
-        embed.set_author(name=f"{disc_str} Now Playing")
+        embed.set_author(name=f"DJ 司会者")
         
         if song.get("thumbnail"):
             embed.set_thumbnail(url=song["thumbnail"])
@@ -4614,7 +4623,8 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
             "duration_str": f"{mins:02d}:{secs:02d}",
             "uploader": data.get('uploader'),
             "requester": interaction.user,
-            "vc": vc
+            "vc": vc,
+            "http_headers": data.get('http_headers', {}) # 🟢 Human headers so that ffmpeg can pretend being human
         }
         
         state["queue"].append(song)
