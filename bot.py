@@ -3319,6 +3319,26 @@ class ShadowTopicModal(discord.ui.Modal, title='Start Shadow Speaking'):
         })
         
         queue_position = len(shadow_queues[guild_id])
+        # 🟢 LEARNING PRIORITY OVERRIDE: Disable Music Loop
+        state = music_states.get(guild_id)
+        if state and state.get("loop"):
+            state["loop"] = False
+            if state.get("text_channel"):
+                await state["text_channel"].send(
+                    f"⚠️ **Learning Priority Override!**\n"
+                    f"{interaction.user.mention} ne listening/shadow speaking ki request daali hai. "
+                    f"As learning is a priority for me, Loop is disabled for now. Let me complete the user's request and then we can sing karaoke together! 🎤",
+                    delete_after=15.0
+                )
+            if state.get("deck_msg"):
+                view = discord.ui.View.from_message(state["deck_msg"])
+                for child in view.children:
+                    if getattr(child, "label", "") == "LOOP":
+                        child.disabled = True
+                        child.style = discord.ButtonStyle.secondary
+                try:
+                    await state["deck_msg"].edit(view=view)
+                except: pass
         
         # 🟢 Trigger Music Pre-emption if music is currently playing
         music_active = await notify_music_preemption(interaction.guild, interaction.user, "Shadow Speaking")
@@ -4295,8 +4315,16 @@ ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 async def play_next_song(guild, client):
     state = music_states.get(guild.id)
     if not state or not state.get("queue"):
-        if state and state.get("vc_client") and state["vc_client"].is_connected():
-            await state["vc_client"].disconnect()
+        if state:
+            # 🟢 Delete music deck as soon as queue ends
+            if state.get("deck_msg"):
+                try: 
+                    await state["deck_msg"].delete()
+                    state["deck_msg"] = None
+                except: pass
+            
+            if state.get("vc_client") and state["vc_client"].is_connected():
+                await state["vc_client"].disconnect()
             music_states.pop(guild.id, None)
         return
 
@@ -4524,6 +4552,14 @@ class MusicDeckView(View):
     @discord.ui.button(label="LOOP", style=discord.ButtonStyle.secondary, row=1)
     async def btn_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
+            # 🟢 SAFETY LOCK: Check if any learning session is active
+            _, s_count, total_study = get_study_queue_counts(self.guild.id)
+            if total_study > 0 or shadow_processing.get(self.guild.id, False) or voice_processing.get(self.guild.id, False):
+                return await interaction.response.send_message(
+                    "⚠️ Learning is active! You cannot enable Loop while a study session is queued.", 
+                    ephemeral=True
+                )
+            
             state = music_states.get(self.guild.id)
             state["loop"] = not state.get("loop", False)
             status = "On" if state["loop"] else "Off"
@@ -4582,7 +4618,7 @@ class MusicDeckView(View):
 
 
 async def execute_music_command(interaction: discord.Interaction, query: str):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True) 
     
     if not interaction.user.voice or not interaction.user.voice.channel:
         return await interaction.followup.send("❌ You must be in a Voice Channel to play music.", ephemeral=True)
@@ -4634,7 +4670,7 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
         state["queue"].append(song)
         
         if total_study == 0:
-            await interaction.edit_original_response(content=f"✅ Added to queue: **{song['title']}**", ephemeral=True)
+            await interaction.edit_original_response(content=f"<a:recordplayer:1563871425603834026> Added to queue: **{song['title']}**", ephemeral=True)
             if not state.get("is_playing"):
                 asyncio.create_task(play_next_song(interaction.guild, interaction.client))
                 
