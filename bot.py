@@ -4307,7 +4307,7 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
     'remote_components': ['ejs:github'],
-    # 🟢 ('mweb' skips 403 HTTPS links automatically)
+    # 🟢 Exclude web_embedded so YouTube never serves poisoned c=WEB_EMBEDDED_PLAYER URLs
     'extractor_args': {
         'youtube': {
             'player_client': ['tv', 'ios', 'mweb', 'web']
