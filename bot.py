@@ -4294,7 +4294,8 @@ if deno_bin_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] = f"{deno_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    # 🟢 Force yt-dlp to prefer m3u8 (HLS) streams which never have 'siu=1' or 403 errors
+    'format': 'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
@@ -4307,10 +4308,10 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
     'remote_components': ['ejs:github'],
-    # 🟢 Exclude web_embedded so YouTube never serves poisoned c=WEB_EMBEDDED_PLAYER URLs
+    # 🟢 'web_safari' and 'tv_simply' (tv samsung) always provide clean m3u8 HLS manifests
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv', 'ios', 'mweb', 'web']
+            'player_client': ['web_safari', 'tv_simply', 'mweb', 'web']
         }
     }
 }
@@ -5034,26 +5035,44 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
             
         mins, secs = divmod(data.get('duration', 0), 60)
         
-        # 🟢 SMART STREAM SELECTOR: Filter out poisoned 'siu=1' & 'WEB_EMBEDDED_PLAYER' URLs
+        # 🟢 SMART STREAM SELECTOR: Strictly prioritize m3u8 (HLS) & reject 'siu=1'
         stream_url = data.get('url')
         stream_headers = data.get('http_headers', {})
         
         formats = data.get('formats', [])
         if formats:
+            hls_audio = []
+            hls_muxed = []
             clean_audio = []
             clean_muxed = []
+            
             for f in formats:
                 f_url = f.get('url', '')
                 if not f_url or 'siu=1' in f_url or 'c=WEB_EMBEDDED_PLAYER' in f_url:
                     continue
-                if f.get('acodec') != 'none':
-                    if f.get('vcodec') == 'none':
+                proto = f.get('protocol', '')
+                vcodec = f.get('vcodec', 'none')
+                acodec = f.get('acodec', 'none')
+                
+                # Priority 1 & 2: HLS (m3u8) streams (Immune to GVS PO Token & 403 Forbidden)
+                if 'm3u8' in proto:
+                    if vcodec == 'none':
+                        hls_audio.append(f)
+                    else:
+                        hls_muxed.append(f)
+                # Priority 3 & 4: Clean direct HTTPS streams without siu=1
+                elif acodec != 'none':
+                    if vcodec == 'none':
                         clean_audio.append(f)
                     else:
                         clean_muxed.append(f)
                         
             chosen_fmt = None
-            if clean_audio:
+            if hls_audio:
+                chosen_fmt = hls_audio[-1]
+            elif hls_muxed:
+                chosen_fmt = hls_muxed[-1]
+            elif clean_audio:
                 chosen_fmt = clean_audio[-1]
             elif clean_muxed:
                 chosen_fmt = clean_muxed[-1]
