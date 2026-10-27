@@ -4310,10 +4310,10 @@ ytdl_format_options = {
     'writeautomaticsub': False,
     'subtitleslangs': ['ja', 'en', 'hi'],
     'remote_components': ['ejs:github'],
-    # 🟢 Exclude web_embedded so YouTube never serves poisoned c=WEB_EMBEDDED_PLAYER URLs
+    # 🟢 Removed 'mweb' & 'web_embedded' to prevent PO Token warnings and 403 errors
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv', 'ios', 'mweb', 'web']
+            'player_client': ['tv', 'ios', 'web']
         }
     }
 }
@@ -4330,41 +4330,88 @@ def get_current_song_elapsed(state):
     return max(0.0, now - state["song_start_time"] - paused_total)
 
 
+def build_music_deck_embed(state, song):
+    """Builds the Neon Green Music Deck embed with live elapsed timer."""
+    dur = max(1, int(song.get("duration") or 0))
+    elapsed = min(dur, int(get_current_song_elapsed(state))) if dur > 0 else int(get_current_song_elapsed(state))
+    e_mins, e_secs = divmod(elapsed, 60)
+    elapsed_str = f"{e_mins:02d}:{e_secs:02d}"
+    requester = song.get("requester")
+    req_mention = requester.mention if requester else "Unknown"
+    status_str = "Paused" if state.get("pause_start_time") else "Playing"
+
+    embed = discord.Embed(
+        title="Now Playing",
+        description=(
+            f"<a:spinningdisc:1563646264237625524> **[{song['title']}]({song['webpage_url']})**\n"
+            f"{elapsed_str} / {song['duration_str']} • [{req_mention}]\n"
+            f"Song By: {song.get('uploader', 'Unknown')}"
+        ),
+        color=0x39ff14
+    )
+    embed.set_author(name="DJ 司会者")
+    if song.get("thumbnail"):
+        embed.set_thumbnail(url=song["thumbnail"])
+    embed.set_footer(
+        text=f"{status_str} • Volume {int(state.get('volume', 1.0)*100)}% • Queue {len(state.get('queue', []))} • Loop {'On' if state.get('loop') else 'Off'} • Autoplay Off"
+    )
+    return embed
+
+
+async def run_music_deck_timer(guild, song):
+    """Background task that updates the main Now Playing deck timer every 5 seconds."""
+    last_time_str = "00:00"
+    while True:
+        await asyncio.sleep(5.0)
+        state = music_states.get(guild.id)
+        if not state or not state.get("is_playing") or state.get("current_song") != song:
+            break
+        deck_msg = state.get("deck_msg")
+        if not deck_msg:
+            break
+        if state.get("pause_start_time"):
+            continue
+            
+        dur = max(1, int(song.get("duration") or 0))
+        elapsed = min(dur, int(get_current_song_elapsed(state))) if dur > 0 else int(get_current_song_elapsed(state))
+        e_mins, e_secs = divmod(elapsed, 60)
+        curr_time_str = f"{e_mins:02d}:{e_secs:02d}"
+        
+        if curr_time_str != last_time_str:
+            last_time_str = curr_time_str
+            try:
+                await deck_msg.edit(embed=build_music_deck_embed(state, song))
+            except Exception:
+                break
+
+
 def build_clean_search_queries(song):
     """Generates clean search queries from messy YouTube titles and metadata."""
     queries = []
     
-    # 1. Exact Track + Artist from YouTube Music metadata if present
     track = (song.get("track") or "").strip()
     artist = (song.get("artist") or "").strip()
     if track and artist:
         queries.append(f"{track} {artist}")
         queries.append(track)
 
-    # 2. User's raw search text (if not a URL)
     raw_q = (song.get("raw_query") or "").strip()
     if raw_q and not raw_q.startswith(("http://", "https://")):
         queries.append(raw_q)
 
-    # 3. Deep-cleaned YouTube video title
     title = song.get("title") or ""
-    # Remove brackets (), [], 【】, 「」
     cleaned = re.sub(r'[\(\[\【\「].*?[\)\]\】\」]', ' ', title)
-    # Cut off pipe '|' or slash '/' extra metadata (e.g., "| Movie Name | Full Video" or "/ Official Video")
     cleaned = re.split(r'\s+[\|\/]\s+', cleaned)[0]
-    # Remove common YouTube junk words
     junk_pattern = r'(?i)\b(official\s*music\s*video|official\s*video|official\s*audio|lyric\s*video|full\s*video|full\s*song|mv|pv|4k|hd|hq|audio|video|lyrics|lyrical|ost|full\s*ver\.?)\b'
     cleaned = re.sub(junk_pattern, ' ', cleaned)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip(" -–—•:")
     
     if cleaned:
         queries.append(cleaned)
-        # Also add uploader if artist isn't already in title
         uploader = (song.get("uploader") or "").replace(" - Topic", "").replace("VEVO", "").strip()
         if uploader and uploader.lower() not in cleaned.lower():
             queries.append(f"{cleaned} {uploader}")
 
-    # Deduplicate while preserving order
     final_queries = []
     for q in queries:
         if q and q.lower() not in [x.lower() for x in final_queries]:
@@ -4394,7 +4441,6 @@ async def extract_youtube_subtitles_lrc(song):
     if not subs:
         return None
         
-    # Prefer Japanese, then English, then Hindi, then any human subtitle
     lang_priority = ['ja', 'ja-JP', 'en', 'en-US', 'hi'] + list(subs.keys())
     sub_formats = None
     for lang in lang_priority:
@@ -4443,7 +4489,7 @@ async def fetch_best_lrc_lyrics(song):
     plain_fallback = None
     headers = {"User-Agent": "NihongoSenseiBot/2.0 (https://discord.gg)"}
 
-    # 🟢 TIER 1: Direct LRCLIB REST API (Fastest & most accurate for new/old tracks)
+    # 🟢 TIER 1: Direct LRCLIB REST API
     async with aiohttp.ClientSession(headers=headers) as session:
         for q in queries:
             try:
@@ -4460,7 +4506,7 @@ async def fetch_best_lrc_lyrics(song):
             except Exception as e:
                 print(f"LRCLIB search error for '{q}': {e}")
 
-    # 🟢 TIER 2: syncedlyrics Multi-Provider (Musixmatch, NetEase, Megalobiz, Genius)
+    # 🟢 TIER 2: syncedlyrics Multi-Provider
     for q in queries:
         try:
             lrc = await asyncio.to_thread(
@@ -4476,7 +4522,7 @@ async def fetch_best_lrc_lyrics(song):
     if yt_sub_lrc:
         return yt_sub_lrc
 
-    # 🟢 TIER 4: Plain Lyrics Auto-Timestamped Fallback (Never fails if lyrics exist anywhere)
+    # 🟢 TIER 4: Plain Lyrics Auto-Timestamped Fallback
     if not plain_fallback:
         for q in queries[:2]:
             try:
@@ -4496,7 +4542,7 @@ async def fetch_best_lrc_lyrics(song):
 
 
 def parse_lrc_blocks(lyrics_cache):
-    """Groups lines with identical/close timestamps into synchronized Karaoke blocks."""
+    """Groups lines with identical/close timestamps into synchronized 3-line Karaoke blocks."""
     if not isinstance(lyrics_cache, list):
         return []
     blocks = []
@@ -4514,7 +4560,7 @@ def parse_lrc_blocks(lyrics_cache):
         t_val = mins * 60.0 + secs
         
         if blocks and abs(blocks[-1]["time"] - t_val) < 0.25:
-            if text not in blocks[-1]["lines"]:
+            if len(blocks[-1]["lines"]) < 3:
                 blocks[-1]["lines"].append(text)
         else:
             blocks.append({"time": t_val, "lines": [text]})
@@ -4524,63 +4570,58 @@ def parse_lrc_blocks(lyrics_cache):
 
 async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song, view):
     """Background task that updates the user's ephemeral Live Karaoke embed in real time."""
-    last_idx = -2
-    last_cache_size = 0
+    last_rendered_desc = ""
     
-    while not view.is_stopped():
-        state = music_states.get(guild.id)
-        if not state or state.get("current_song") != song or not state.get("is_playing"):
-            break
-            
-        cache = song.get("lyrics_cache")
-        if cache == "NOT_FOUND":
-            embed = discord.Embed(
-                title=f"🎤 Live Karaoke: {song['title']}",
-                description="❌ **No lyrics found for this track in global databases.**",
-                color=0xe74c3c
-            )
-            try: await interaction.edit_original_response(embed=embed, view=None)
-            except Exception: pass
-            break
-            
-        if cache == "ERROR":
-            embed = discord.Embed(
-                title=f"🎤 Live Karaoke: {song['title']}",
-                description="❌ **Lyrics engine encountered an error.**",
-                color=0xe74c3c
-            )
-            try: await interaction.edit_original_response(embed=embed, view=None)
-            except Exception: pass
-            break
-            
-        if not isinstance(cache, list) or not cache:
-            await asyncio.sleep(1.5)
-            continue
-            
-        blocks = parse_lrc_blocks(cache)
-        if not blocks:
-            await asyncio.sleep(1.5)
-            continue
-            
-        elapsed = get_current_song_elapsed(state)
-        
-        # Find active lyric block (with 0.7s lookahead for Discord network latency)
-        active_idx = 0
-        for idx, b in enumerate(blocks):
-            if b["time"] <= (elapsed + 0.7):
-                active_idx = idx
-            else:
+    # 🟢 FIXED: Using view.is_finished() instead of non-existent view.is_stopped()
+    while not view.is_finished():
+        try:
+            state = music_states.get(guild.id)
+            if not state or state.get("current_song") != song or not state.get("is_playing"):
                 break
                 
-        current_cache_size = len(cache)
-        if active_idx != last_idx or current_cache_size != last_cache_size:
-            last_idx = active_idx
-            last_cache_size = current_cache_size
+            cache = song.get("lyrics_cache")
+            if cache == "NOT_FOUND":
+                embed = discord.Embed(
+                    title=f"🎤 Live Karaoke: {song['title'][:200]}",
+                    description="❌ **No lyrics found for this track in global databases.**",
+                    color=0xe74c3c
+                )
+                try: await interaction.edit_original_response(embed=embed, view=None)
+                except Exception: pass
+                break
+                
+            if cache == "ERROR":
+                embed = discord.Embed(
+                    title=f"🎤 Live Karaoke: {song['title'][:200]}",
+                    description="❌ **Lyrics engine encountered an error.**",
+                    color=0xe74c3c
+                )
+                try: await interaction.edit_original_response(embed=embed, view=None)
+                except Exception: pass
+                break
+                
+            if not isinstance(cache, list) or not cache:
+                await asyncio.sleep(1.5)
+                continue
+                
+            blocks = parse_lrc_blocks(cache)
+            if not blocks:
+                await asyncio.sleep(1.5)
+                continue
+                
+            elapsed = get_current_song_elapsed(state)
             
-            # Build Karaoke Window: 1 Previous + 1 Current (Highlighted) + 2 Upcoming
+            # Find active lyric block (-1 means instrumental intro before first lyric timestamp)
+            active_idx = -1
+            for idx, b in enumerate(blocks):
+                if b["time"] <= (elapsed + 0.6):
+                    active_idx = idx
+                else:
+                    break
+                    
             display_parts = []
             
-            # Progress Bar Header
+            # 1. Live Progress Bar Header
             dur = max(1, int(song.get("duration") or 180))
             el_int = min(dur, int(elapsed))
             e_m, e_s = divmod(el_int, 60)
@@ -4591,42 +4632,51 @@ async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song,
             status_icon = "⏸️" if state.get("pause_start_time") else "▶️"
             display_parts.append(f"`{status_icon} {e_m:02d}:{e_s:02d} {bar_str} {d_m:02d}:{d_s:02d}`\n")
             
-            # Previous Block (Dimmed)
-            if active_idx > 0:
-                prev_lines = " / ".join(blocks[active_idx - 1]["lines"][:2])
-                display_parts.append(f"*{prev_lines}*\n")
+            # 2. Previous Block + Current Active Block (Highlighted)
+            if active_idx == -1:
+                display_parts.append("🎤 **🎶 Instrumental / Intro...**\n")
+                next_start = 0
             else:
-                display_parts.append("*🎶 Instrumental / Intro...*\n")
+                if active_idx > 0:
+                    prev_lines = " / ".join(blocks[active_idx - 1]["lines"][:2])
+                    display_parts.append(f"*{prev_lines}*\n")
                 
-            # 🟢 Current Active Block (Highlighted)
-            curr_block = blocks[active_idx]["lines"]
-            curr_formatted = f"🎤 **{curr_block[0]}**"
-            if len(curr_block) > 1:
-                curr_formatted += f"\n> 🏮 **{curr_block[1]}**"
-            if len(curr_block) > 2:
-                curr_formatted += f"\n> 🗣️ *{curr_block[2]}*"
-            display_parts.append(f"{curr_formatted}\n")
+                curr_block = blocks[active_idx]["lines"]
+                curr_formatted = f"🎤 **{curr_block[0]}**"
+                if len(curr_block) > 1:
+                    curr_formatted += f"\n> 🏮 **{curr_block[1]}**"
+                if len(curr_block) > 2:
+                    curr_formatted += f"\n> 🗣️ *{curr_block[2]}*"
+                display_parts.append(f"{curr_formatted}\n")
+                next_start = active_idx + 1
             
-            # Next 2 Upcoming Blocks
-            for next_i in range(active_idx + 1, min(len(blocks), active_idx + 3)):
+            # 3. Next 2 Upcoming Blocks
+            for next_i in range(next_start, min(len(blocks), next_start + 2)):
                 nxt_lines = " • ".join(blocks[next_i]["lines"][:2])
                 display_parts.append(f"⏳ `{nxt_lines}`")
                 
-            ai_status = "✅ AI Kana/Romaji Synced" if song.get("ai_translated") else "⚡ Live Synced (AI Translating Kana/Romaji...)"
+            new_desc = "\n".join(display_parts)[:4000]
             
-            embed = discord.Embed(
-                title=f"🎤 Live Karaoke: {song['title'][:200]}",
-                description="\n".join(display_parts)[:4000],
-                color=0x39ff14
-            )
-            embed.set_footer(text=f"{ai_status} • Translations by AI Sensei")
-            
-            try:
-                await interaction.edit_original_response(embed=embed, view=view)
-            except Exception:
-                break
+            if new_desc != last_rendered_desc:
+                last_rendered_desc = new_desc
+                ai_status = "✅ AI Kana/Romaji Synced" if song.get("ai_translated") else "⚡ Live Synced (AI Translating Kana/Romaji...)"
                 
-        await asyncio.sleep(1.8)
+                embed = discord.Embed(
+                    title=f"🎤 Live Karaoke: {song['title'][:200]}",
+                    description=new_desc,
+                    color=0x39ff14
+                )
+                embed.set_footer(text=f"{ai_status} • Translations by AI Sensei")
+                
+                try:
+                    await interaction.edit_original_response(embed=embed, view=view)
+                except Exception:
+                    break
+                    
+            await asyncio.sleep(2.0)
+        except Exception as e:
+            print(f"Live Karaoke Loop Error: {e}")
+            break
 
 
 async def play_next_song(guild, client):
@@ -4652,7 +4702,7 @@ async def play_next_song(guild, client):
         if total_study > 0:
             state["is_playing"] = False
             state["yielded_to_study"] = True
-            await asyncio.sleep(5) # Pause music progression, let Study finish
+            await asyncio.sleep(5)
         else:
             state["yielded_to_study"] = False
             break
@@ -4666,7 +4716,6 @@ async def play_next_song(guild, client):
     
     text_ch = state["text_channel"]
     vc = song["vc"]
-    requester = song["requester"]
     
     vc_client = discord.utils.get(client.voice_clients, guild=guild)
     if not vc_client or not vc_client.is_connected():
@@ -4682,9 +4731,8 @@ async def play_next_song(guild, client):
     def after_playing(error):
         if error:
             print(f"Player error: {error}")
-        # Loop check or next song
         if state.get("loop") and state.get("current_song"):
-            state["queue"].insert(0, state["current_song"]) # Put it back at top
+            state["queue"].insert(0, state["current_song"])
             
         coro = play_next_song(guild, client)
         fut = asyncio.run_coroutine_threadsafe(coro, client.loop)
@@ -4692,7 +4740,6 @@ async def play_next_song(guild, client):
         except Exception as e: print(f"Error playing next: {e}")
 
     try:
-        # 🟢 CLEAN FFMPEG STREAMING OPTIONS (Supports both direct HTTPS & HLS m3u8 without 403)
         ua = song.get("http_headers", {}).get("User-Agent", "Mozilla/5.0")
         ua = ua.replace('"', '')
         
@@ -4702,34 +4749,27 @@ async def play_next_song(guild, client):
         }
 
         audio_source = discord.FFmpegPCMAudio(song["url"], **current_opts)
-        
-        # Apply volume
         audio_source = discord.PCMVolumeTransformer(audio_source, volume=state.get("volume", 1.0))
         vc_client.play(audio_source, after=after_playing)
+        
+        # Reset exact start timestamp right when FFmpeg starts playing
         state["song_start_time"] = time.time()
+        state["total_paused_duration"] = 0.0
+        state["pause_start_time"] = None
         
-        # 3. 🟢 NEON GREEN MUSIC DECK
-        embed = discord.Embed(
-            title="Now Playing", 
-            description=f"<a:spinningdisc:1563646264237625524> **[{song['title']}]({song['webpage_url']})**\n00:00 / {song['duration_str']} • [{requester.mention}]\nSong By: {song.get('uploader', 'Unknown')}", 
-            color=0x39ff14 
-        )
-        embed.set_author(name="DJ 司会者")
-        
-        if song.get("thumbnail"):
-            embed.set_thumbnail(url=song["thumbnail"])
-            
-        embed.set_footer(text=f"Playing • Volume {int(state.get('volume', 1.0)*100)}% • Queue {len(state['queue'])} • Loop {'On' if state.get('loop') else 'Off'} • Autoplay Off")
-        
+        # 3. 🟢 NEON GREEN MUSIC DECK + LIVE TIMER TASK
+        embed = build_music_deck_embed(state, song)
         deck_view = MusicDeckView(guild, client)
         
-        # Delete old deck if exists to keep chat clean
         if state.get("deck_msg"):
             try: await state["deck_msg"].delete()
             except: pass
             
         deck_msg = await text_ch.send(embed=embed, view=deck_view)
         state["deck_msg"] = deck_msg
+        
+        # Start live timer updater for the Now Playing deck
+        asyncio.create_task(run_music_deck_timer(guild, song))
         
         # 4. 🟢 BACKGROUND LYRICS PRE-FETCHER
         asyncio.create_task(prefetch_and_translate_lyrics(song, text_ch))
