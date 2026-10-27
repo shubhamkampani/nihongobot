@@ -4481,12 +4481,13 @@ async def extract_youtube_subtitles_lrc(song):
 
 
 async def fetch_best_lrc_lyrics(song):
-    """4-Tier Lyrics Harvester: LRCLIB Direct API -> SyncedLyrics Multi-Provider -> YT Subtitles -> Plain Fallback."""
+    """4-Tier Lyrics Harvester with Duration-Matching for exact Video/Audio sync."""
     queries = build_clean_search_queries(song)
     plain_fallback = None
+    target_dur = int(song.get("duration") or 0)
     headers = {"User-Agent": "NihongoSenseiBot/2.0 (https://discord.gg)"}
 
-    # 🟢 TIER 1: Direct LRCLIB REST API
+    # 🟢 TIER 1: Direct LRCLIB REST API (Sorted by closest duration to match MV vs Audio!)
     async with aiohttp.ClientSession(headers=headers) as session:
         for q in queries:
             try:
@@ -4495,15 +4496,31 @@ async def fetch_best_lrc_lyrics(song):
                     if resp.status == 200:
                         results = await resp.json()
                         if isinstance(results, list) and results:
+                            synced_candidates = []
                             for item in results:
-                                if item.get("syncedLyrics"):
-                                    return item["syncedLyrics"]
                                 if not plain_fallback and item.get("plainLyrics"):
                                     plain_fallback = item["plainLyrics"]
+                                if item.get("syncedLyrics"):
+                                    item_dur = int(item.get("duration") or 0)
+                                    diff = abs(item_dur - target_dur) if (target_dur and item_dur) else 999
+                                    synced_candidates.append((diff, item["syncedLyrics"]))
+                            if synced_candidates:
+                                synced_candidates.sort(key=lambda x: x[0])
+                                # Prefer YouTube native subtitles if LRCLIB duration is off by >12s (MV intro mismatch)
+                                if synced_candidates[0][0] > 12:
+                                    yt_sub = await extract_youtube_subtitles_lrc(song)
+                                    if yt_sub:
+                                        return yt_sub
+                                return synced_candidates[0][1]
             except Exception as e:
                 print(f"LRCLIB search error for '{q}': {e}")
 
-    # 🟢 TIER 2: syncedlyrics Multi-Provider
+    # 🟢 TIER 2: YouTube Built-in Official Captions/Subtitles (100% video-synced)
+    yt_sub_lrc = await extract_youtube_subtitles_lrc(song)
+    if yt_sub_lrc:
+        return yt_sub_lrc
+
+    # 🟢 TIER 3: syncedlyrics Multi-Provider
     for q in queries:
         try:
             lrc = await asyncio.to_thread(
@@ -4513,11 +4530,6 @@ async def fetch_best_lrc_lyrics(song):
                 return lrc
         except Exception as e:
             print(f"SyncedLyrics synced search error for '{q}': {e}")
-
-    # 🟢 TIER 3: YouTube Built-in Official Captions/Subtitles
-    yt_sub_lrc = await extract_youtube_subtitles_lrc(song)
-    if yt_sub_lrc:
-        return yt_sub_lrc
 
     # 🟢 TIER 4: Plain Lyrics Auto-Timestamped Fallback
     if not plain_fallback:
@@ -4539,7 +4551,7 @@ async def fetch_best_lrc_lyrics(song):
 
 
 def parse_lrc_blocks(lyrics_cache):
-    """Groups lines with identical/close timestamps into synchronized 3-line Karaoke blocks."""
+    """Groups lines with identical/close timestamps into synchronized 2-line Karaoke blocks (Original + Romaji)."""
     if not isinstance(lyrics_cache, list):
         return []
     blocks = []
@@ -4557,7 +4569,7 @@ def parse_lrc_blocks(lyrics_cache):
         t_val = mins * 60.0 + secs
         
         if blocks and abs(blocks[-1]["time"] - t_val) < 0.25:
-            if len(blocks[-1]["lines"]) < 3:
+            if len(blocks[-1]["lines"]) < 2:
                 blocks[-1]["lines"].append(text)
         else:
             blocks.append({"time": t_val, "lines": [text]})
@@ -4566,10 +4578,11 @@ def parse_lrc_blocks(lyrics_cache):
 
 
 async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song, view):
-    """Background task that updates the user's ephemeral Live Karaoke embed in real time."""
-    last_rendered_desc = ""
+    """Clean, minimal real-time Karaoke display (Only Current Original Lyric + Romaji, synced with +2.2s lookahead)."""
+    last_active_idx = -999
+    last_cache_size = 0
+    last_bar_Bucket = -1
     
-    # 🟢 FIXED: Using view.is_finished() instead of non-existent view.is_stopped()
     while not view.is_finished():
         try:
             state = music_states.get(guild.id)
@@ -4598,65 +4611,61 @@ async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song,
                 break
                 
             if not isinstance(cache, list) or not cache:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
                 continue
                 
             blocks = parse_lrc_blocks(cache)
             if not blocks:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
                 continue
                 
             elapsed = get_current_song_elapsed(state)
             
-            # Find active lyric block (-1 means instrumental intro before first lyric timestamp)
+            # 🟢 +2.2 SECONDS LOOKAHEAD OFFSET: Compensates for Discord API edit delay & audio buffer!
+            sync_time = elapsed + 2.2
+            
             active_idx = -1
             for idx, b in enumerate(blocks):
-                if b["time"] <= (elapsed + 0.6):
+                if b["time"] <= sync_time:
                     active_idx = idx
                 else:
                     break
                     
-            display_parts = []
+            current_cache_size = len(cache)
+            bar_bucket = int(elapsed // 4) # Update timer bar smoothly every 4s even during long instrumental gaps
             
-            # 1. Live Progress Bar Header
-            dur = max(1, int(song.get("duration") or 180))
-            el_int = min(dur, int(elapsed))
-            e_m, e_s = divmod(el_int, 60)
-            d_m, d_s = divmod(dur, 60)
-            bar_len = 14
-            filled = min(bar_len, int((el_int / dur) * bar_len))
-            bar_str = "━" * filled + "●" + "─" * (bar_len - filled)
-            status_icon = "⏸️" if state.get("pause_start_time") else "▶️"
-            display_parts.append(f"`{status_icon} {e_m:02d}:{e_s:02d} {bar_str} {d_m:02d}:{d_s:02d}`\n")
-            
-            # 2. Previous Block + Current Active Block (Highlighted)
-            if active_idx == -1:
-                display_parts.append("🎤 **🎶 Instrumental / Intro...**\n")
-                next_start = 0
-            else:
-                if active_idx > 0:
-                    prev_lines = " / ".join(blocks[active_idx - 1]["lines"][:2])
-                    display_parts.append(f"*{prev_lines}*\n")
+            # Immediately edit message the exact moment active_idx changes!
+            if active_idx != last_active_idx or current_cache_size != last_cache_size or bar_bucket != last_bar_Bucket:
+                last_active_idx = active_idx
+                last_cache_size = current_cache_size
+                last_bar_Bucket = bar_bucket
                 
-                curr_block = blocks[active_idx]["lines"]
-                curr_formatted = f"🎤 **{curr_block[0]}**"
-                if len(curr_block) > 1:
-                    curr_formatted += f"\n> 🏮 **{curr_block[1]}**"
-                if len(curr_block) > 2:
-                    curr_formatted += f"\n> 🗣️ *{curr_block[2]}*"
-                display_parts.append(f"{curr_formatted}\n")
-                next_start = active_idx + 1
-            
-            # 3. Next 2 Upcoming Blocks
-            for next_i in range(next_start, min(len(blocks), next_start + 2)):
-                nxt_lines = " • ".join(blocks[next_i]["lines"][:2])
-                display_parts.append(f"⏳ `{nxt_lines}`")
+                dur = max(1, int(song.get("duration") or 180))
+                el_int = min(dur, int(elapsed))
+                e_m, e_s = divmod(el_int, 60)
+                d_m, d_s = divmod(dur, 60)
+                bar_len = 14
+                filled = min(bar_len, int((el_int / dur) * bar_len))
+                bar_str = "━" * filled + "●" + "─" * (bar_len - filled)
+                status_icon = "⏸️" if state.get("pause_start_time") else "▶️"
                 
-            new_desc = "\n".join(display_parts)[:4000]
-            
-            if new_desc != last_rendered_desc:
-                last_rendered_desc = new_desc
-                ai_status = "✅ AI Kana/Romaji Synced" if song.get("ai_translated") else "⚡ Live Synced (AI Translating Kana/Romaji...)"
+                header_bar = f"`{status_icon} {e_m:02d}:{e_s:02d} {bar_str} {d_m:02d}:{d_s:02d}`"
+                
+                # 🟢 ULTRA-CLEAN MINIMAL DISPLAY: Only Active Original Line + Romaji!
+                if active_idx == -1:
+                    lyric_box = "### 🎶 *Instrumental / Intro...*"
+                else:
+                    curr_lines = blocks[active_idx]["lines"]
+                    orig_line = curr_lines[0]
+                    romaji_line = curr_lines[1] if len(curr_lines) > 1 else ""
+                    
+                    if romaji_line and romaji_line.lower() != orig_line.lower():
+                        lyric_box = f"### 🎤 {orig_line}\n> 🗣️ *{romaji_line}*"
+                    else:
+                        lyric_box = f"### 🎤 {orig_line}"
+                
+                new_desc = f"{header_bar}\n\n{lyric_box}"
+                ai_status = "✅ Original + Romaji Synced" if song.get("ai_translated") else "⚡ Live Synced (AI Generating Romaji...)"
                 
                 embed = discord.Embed(
                     title=f"🎤 Live Karaoke: {song['title'][:200]}",
@@ -4670,11 +4679,10 @@ async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song,
                 except Exception:
                     break
                     
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(0.8) # Fast 0.8s polling so line switches never lag
         except Exception as e:
             print(f"Live Karaoke Loop Error: {e}")
             break
-
 
 async def play_next_song(guild, client):
     state = music_states.get(guild.id)
@@ -4794,15 +4802,17 @@ async def prefetch_and_translate_lyrics(song, text_ch):
             song["lyrics_cache"] = "NOT_FOUND"
             return
             
-        # 3. Upgrade in background with AI Sensei Hiragana/Katakana + Romaji lines
+        # 3. 🟢 Upgrade in background with strictly 2 lines per timestamp:
+        # Line 1: Exact Original Song Lyric (Hindi/English/Japanese as sung)
+        # Line 2: Japanese Romaji (If song is Japanese -> its Romaji reading; If Hindi/English -> Japanese translation written in Romaji)
         prompt = (
-            f"Here is a timestamped LRC lyrics file. Convert/translate the lyrics line-by-line for Japanese learners.\n"
-            f"RULES:\n"
-            f"1. DO NOT change the [mm:ss.xx] timestamps.\n"
-            f"2. For each timestamped line, output exactly 3 lines with the SAME timestamp:\n"
-            f"   [Original Timestamp] Original lyrics (or Japanese translation if non-Japanese)\n"
-            f"   [Original Timestamp] 100% Hiragana/Katakana reading (NO KANJI ALLOWED)\n"
-            f"   [Original Timestamp] Romaji reading\n\n"
+            f"Here is a timestamped LRC lyrics file for the song '{song.get('title', '')}'.\n"
+            f"Process it line-by-line following these STRICT RULES:\n"
+            f"1. DO NOT change or skip any [mm:ss.xx] timestamps.\n"
+            f"2. For each timestamped line, output EXACTLY 2 lines with the exact same timestamp:\n"
+            f"   [Original Timestamp] Keep the EXACT original lyric in its original language (Japanese Kanji/Kana, Hindi/Hinglish, or English — do NOT translate Line 1).\n"
+            f"   [Original Timestamp] Japanese Romaji ONLY (If the original line is Japanese, write its exact Romaji pronunciation. If the original line is Hindi/English/other, translate the meaning into natural Japanese and write it strictly in Romaji).\n"
+            f"3. Do NOT output Hiragana-only middle lines. Output ONLY the timestamped lines.\n\n"
             f"LRC Data:\n{lrc_data[:3800]}"
         )
 
@@ -4817,7 +4827,6 @@ async def prefetch_and_translate_lyrics(song, text_ch):
         print(f"Lyrics Engine Error: {e}")
         if not isinstance(song.get("lyrics_cache"), list):
             song["lyrics_cache"] = "ERROR"
-
 
 class LiveLyricsView(View):
     def __init__(self, user, song, guild):
