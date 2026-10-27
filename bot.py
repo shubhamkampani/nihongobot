@@ -4306,20 +4306,16 @@ ytdl_format_options = {
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
-    'writesubtitles': True,
-    'writeautomaticsub': False,
-    'subtitleslangs': ['ja', 'en', 'hi'],
     'remote_components': ['ejs:github'],
-    # 🟢 Removed 'mweb' & 'web_embedded' to prevent PO Token warnings and 403 errors
+    # 🟢 ('mweb' skips 403 HTTPS links automatically)
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv', 'ios', 'web']
+            'player_client': ['tv', 'ios', 'mweb', 'web']
         }
     }
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
-
 
 def get_current_song_elapsed(state):
     """Calculates exact playback position in seconds, accounting for pauses."""
