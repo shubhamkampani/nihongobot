@@ -4625,7 +4625,7 @@ async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song,
             # 🟢 TRUE AUDIO STREAM SYNC:
             # Subtract 0.5s for FFmpeg m3u8 initial connection buffer + apply any manual/auto MV intro offset
             lyric_offset = song.get("lyric_offset", 0.0)
-            sync_time = max(0.0, elapsed - 0.5 + lyric_offset)
+            sync_time = max(0.0, elapsed - 0.9 + lyric_offset)
             
             active_idx = -1
             for idx, b in enumerate(blocks):
