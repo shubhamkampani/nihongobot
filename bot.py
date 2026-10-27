@@ -4306,6 +4306,9 @@ ytdl_format_options = {
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
+    'writesubtitles': True,
+    'writeautomaticsub': False,
+    'subtitleslangs': ['ja', 'en', 'hi'],
     'remote_components': ['ejs:github'],
     # 🟢 Exclude web_embedded so YouTube never serves poisoned c=WEB_EMBEDDED_PLAYER URLs
     'extractor_args': {
@@ -4316,6 +4319,315 @@ ytdl_format_options = {
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+
+
+def get_current_song_elapsed(state):
+    """Calculates exact playback position in seconds, accounting for pauses."""
+    if not state or not state.get("song_start_time"):
+        return 0.0
+    now = state.get("pause_start_time") or time.time()
+    paused_total = state.get("total_paused_duration", 0.0)
+    return max(0.0, now - state["song_start_time"] - paused_total)
+
+
+def build_clean_search_queries(song):
+    """Generates clean search queries from messy YouTube titles and metadata."""
+    queries = []
+    
+    # 1. Exact Track + Artist from YouTube Music metadata if present
+    track = (song.get("track") or "").strip()
+    artist = (song.get("artist") or "").strip()
+    if track and artist:
+        queries.append(f"{track} {artist}")
+        queries.append(track)
+
+    # 2. User's raw search text (if not a URL)
+    raw_q = (song.get("raw_query") or "").strip()
+    if raw_q and not raw_q.startswith(("http://", "https://")):
+        queries.append(raw_q)
+
+    # 3. Deep-cleaned YouTube video title
+    title = song.get("title") or ""
+    # Remove brackets (), [], 【】, 「」
+    cleaned = re.sub(r'[\(\[\【\「].*?[\)\]\】\」]', ' ', title)
+    # Cut off pipe '|' or slash '/' extra metadata (e.g., "| Movie Name | Full Video" or "/ Official Video")
+    cleaned = re.split(r'\s+[\|\/]\s+', cleaned)[0]
+    # Remove common YouTube junk words
+    junk_pattern = r'(?i)\b(official\s*music\s*video|official\s*video|official\s*audio|lyric\s*video|full\s*video|full\s*song|mv|pv|4k|hd|hq|audio|video|lyrics|lyrical|ost|full\s*ver\.?)\b'
+    cleaned = re.sub(junk_pattern, ' ', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(" -–—•:")
+    
+    if cleaned:
+        queries.append(cleaned)
+        # Also add uploader if artist isn't already in title
+        uploader = (song.get("uploader") or "").replace(" - Topic", "").replace("VEVO", "").strip()
+        if uploader and uploader.lower() not in cleaned.lower():
+            queries.append(f"{cleaned} {uploader}")
+
+    # Deduplicate while preserving order
+    final_queries = []
+    for q in queries:
+        if q and q.lower() not in [x.lower() for x in final_queries]:
+            final_queries.append(q)
+    return final_queries
+
+
+def convert_plain_to_lrc(plain_text, duration):
+    """Converts unsynced plain lyrics into timestamped LRC lines across song duration."""
+    lines = [ln.strip() for ln in plain_text.split('\n') if ln.strip() and not ln.strip().startswith('[')]
+    if not lines:
+        return None
+    total_dur = max(60, int(duration or 180) - 10)
+    step = max(2.5, total_dur / max(len(lines), 1))
+    lrc_lines = []
+    for idx, ln in enumerate(lines):
+        t_sec = min(total_dur, idx * step + 3.0)
+        mins = int(t_sec // 60)
+        secs = t_sec % 60
+        lrc_lines.append(f"[{mins:02d}:{secs:05.2f}] {ln}")
+    return "\n".join(lrc_lines)
+
+
+async def extract_youtube_subtitles_lrc(song):
+    """Fallback: Extracts synced subtitles directly from YouTube video if available."""
+    subs = song.get("subtitles") or {}
+    if not subs:
+        return None
+        
+    # Prefer Japanese, then English, then Hindi, then any human subtitle
+    lang_priority = ['ja', 'ja-JP', 'en', 'en-US', 'hi'] + list(subs.keys())
+    sub_formats = None
+    for lang in lang_priority:
+        if lang in subs and subs[lang]:
+            sub_formats = subs[lang]
+            break
+            
+    if not sub_formats:
+        return None
+        
+    json3_url = next((f.get('url') for f in sub_formats if f.get('ext') == 'json3'), None)
+    if not json3_url:
+        return None
+        
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(json3_url, timeout=8) as resp:
+                if resp.status != 200:
+                    return None
+                sub_data = await resp.json()
+                
+        events = sub_data.get("events", [])
+        lrc_lines = []
+        for ev in events:
+            segs = ev.get("segs")
+            if not segs:
+                continue
+            text = "".join(s.get("utf8", "") for s in segs).replace("\n", " ").strip()
+            if not text or text in ["♪", "🎶", "[Music]", "[音楽]"]:
+                continue
+            start_ms = ev.get("tStartMs", 0)
+            total_sec = start_ms / 1000.0
+            mins = int(total_sec // 60)
+            secs = total_sec % 60
+            lrc_lines.append(f"[{mins:02d}:{secs:05.2f}] {text}")
+            
+        return "\n".join(lrc_lines) if len(lrc_lines) >= 4 else None
+    except Exception as e:
+        print(f"YT Subtitle fallback error: {e}")
+        return None
+
+
+async def fetch_best_lrc_lyrics(song):
+    """4-Tier Lyrics Harvester: LRCLIB Direct API -> SyncedLyrics Multi-Provider -> YT Subtitles -> Plain Fallback."""
+    queries = build_clean_search_queries(song)
+    plain_fallback = None
+    headers = {"User-Agent": "NihongoSenseiBot/2.0 (https://discord.gg)"}
+
+    # 🟢 TIER 1: Direct LRCLIB REST API (Fastest & most accurate for new/old tracks)
+    async with aiohttp.ClientSession(headers=headers) as session:
+        for q in queries:
+            try:
+                url = f"https://lrclib.net/api/search?q={urllib.parse.quote(q)}"
+                async with session.get(url, timeout=7) as resp:
+                    if resp.status == 200:
+                        results = await resp.json()
+                        if isinstance(results, list) and results:
+                            for item in results:
+                                if item.get("syncedLyrics"):
+                                    return item["syncedLyrics"]
+                                if not plain_fallback and item.get("plainLyrics"):
+                                    plain_fallback = item["plainLyrics"]
+            except Exception as e:
+                print(f"LRCLIB search error for '{q}': {e}")
+
+    # 🟢 TIER 2: syncedlyrics Multi-Provider (Musixmatch, NetEase, Megalobiz, Genius)
+    for q in queries:
+        try:
+            lrc = await asyncio.to_thread(
+                lambda query_str=q: syncedlyrics.search(query_str, synced_only=True)
+            )
+            if lrc and "[" in lrc:
+                return lrc
+        except Exception as e:
+            print(f"SyncedLyrics synced search error for '{q}': {e}")
+
+    # 🟢 TIER 3: YouTube Built-in Official Captions/Subtitles
+    yt_sub_lrc = await extract_youtube_subtitles_lrc(song)
+    if yt_sub_lrc:
+        return yt_sub_lrc
+
+    # 🟢 TIER 4: Plain Lyrics Auto-Timestamped Fallback (Never fails if lyrics exist anywhere)
+    if not plain_fallback:
+        for q in queries[:2]:
+            try:
+                plain_res = await asyncio.to_thread(
+                    lambda query_str=q: syncedlyrics.search(query_str, plain_only=True)
+                )
+                if plain_res:
+                    plain_fallback = plain_res
+                    break
+            except Exception:
+                pass
+
+    if plain_fallback:
+        return convert_plain_to_lrc(plain_fallback, song.get("duration", 180))
+
+    return None
+
+
+def parse_lrc_blocks(lyrics_cache):
+    """Groups lines with identical/close timestamps into synchronized Karaoke blocks."""
+    if not isinstance(lyrics_cache, list):
+        return []
+    blocks = []
+    pattern = re.compile(r'^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$')
+    
+    for raw_line in lyrics_cache:
+        m = pattern.match(raw_line.strip())
+        if not m:
+            continue
+        mins = int(m.group(1))
+        secs = float(m.group(2))
+        text = m.group(3).strip()
+        if not text:
+            continue
+        t_val = mins * 60.0 + secs
+        
+        if blocks and abs(blocks[-1]["time"] - t_val) < 0.25:
+            if text not in blocks[-1]["lines"]:
+                blocks[-1]["lines"].append(text)
+        else:
+            blocks.append({"time": t_val, "lines": [text]})
+            
+    return blocks
+
+
+async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song, view):
+    """Background task that updates the user's ephemeral Live Karaoke embed in real time."""
+    last_idx = -2
+    last_cache_size = 0
+    
+    while not view.is_stopped():
+        state = music_states.get(guild.id)
+        if not state or state.get("current_song") != song or not state.get("is_playing"):
+            break
+            
+        cache = song.get("lyrics_cache")
+        if cache == "NOT_FOUND":
+            embed = discord.Embed(
+                title=f"🎤 Live Karaoke: {song['title']}",
+                description="❌ **No lyrics found for this track in global databases.**",
+                color=0xe74c3c
+            )
+            try: await interaction.edit_original_response(embed=embed, view=None)
+            except Exception: pass
+            break
+            
+        if cache == "ERROR":
+            embed = discord.Embed(
+                title=f"🎤 Live Karaoke: {song['title']}",
+                description="❌ **Lyrics engine encountered an error.**",
+                color=0xe74c3c
+            )
+            try: await interaction.edit_original_response(embed=embed, view=None)
+            except Exception: pass
+            break
+            
+        if not isinstance(cache, list) or not cache:
+            await asyncio.sleep(1.5)
+            continue
+            
+        blocks = parse_lrc_blocks(cache)
+        if not blocks:
+            await asyncio.sleep(1.5)
+            continue
+            
+        elapsed = get_current_song_elapsed(state)
+        
+        # Find active lyric block (with 0.7s lookahead for Discord network latency)
+        active_idx = 0
+        for idx, b in enumerate(blocks):
+            if b["time"] <= (elapsed + 0.7):
+                active_idx = idx
+            else:
+                break
+                
+        current_cache_size = len(cache)
+        if active_idx != last_idx or current_cache_size != last_cache_size:
+            last_idx = active_idx
+            last_cache_size = current_cache_size
+            
+            # Build Karaoke Window: 1 Previous + 1 Current (Highlighted) + 2 Upcoming
+            display_parts = []
+            
+            # Progress Bar Header
+            dur = max(1, int(song.get("duration") or 180))
+            el_int = min(dur, int(elapsed))
+            e_m, e_s = divmod(el_int, 60)
+            d_m, d_s = divmod(dur, 60)
+            bar_len = 14
+            filled = min(bar_len, int((el_int / dur) * bar_len))
+            bar_str = "━" * filled + "●" + "─" * (bar_len - filled)
+            status_icon = "⏸️" if state.get("pause_start_time") else "▶️"
+            display_parts.append(f"`{status_icon} {e_m:02d}:{e_s:02d} {bar_str} {d_m:02d}:{d_s:02d}`\n")
+            
+            # Previous Block (Dimmed)
+            if active_idx > 0:
+                prev_lines = " / ".join(blocks[active_idx - 1]["lines"][:2])
+                display_parts.append(f"*{prev_lines}*\n")
+            else:
+                display_parts.append("*🎶 Instrumental / Intro...*\n")
+                
+            # 🟢 Current Active Block (Highlighted)
+            curr_block = blocks[active_idx]["lines"]
+            curr_formatted = f"🎤 **{curr_block[0]}**"
+            if len(curr_block) > 1:
+                curr_formatted += f"\n> 🏮 **{curr_block[1]}**"
+            if len(curr_block) > 2:
+                curr_formatted += f"\n> 🗣️ *{curr_block[2]}*"
+            display_parts.append(f"{curr_formatted}\n")
+            
+            # Next 2 Upcoming Blocks
+            for next_i in range(active_idx + 1, min(len(blocks), active_idx + 3)):
+                nxt_lines = " • ".join(blocks[next_i]["lines"][:2])
+                display_parts.append(f"⏳ `{nxt_lines}`")
+                
+            ai_status = "✅ AI Kana/Romaji Synced" if song.get("ai_translated") else "⚡ Live Synced (AI Translating Kana/Romaji...)"
+            
+            embed = discord.Embed(
+                title=f"🎤 Live Karaoke: {song['title'][:200]}",
+                description="\n".join(display_parts)[:4000],
+                color=0x39ff14
+            )
+            embed.set_footer(text=f"{ai_status} • Translations by AI Sensei")
+            
+            try:
+                await interaction.edit_original_response(embed=embed, view=view)
+            except Exception:
+                break
+                
+        await asyncio.sleep(1.8)
+
 
 async def play_next_song(guild, client):
     state = music_states.get(guild.id)
@@ -4349,6 +4661,8 @@ async def play_next_song(guild, client):
     song = state["queue"].pop(0)
     state["current_song"] = song
     state["song_start_time"] = time.time()
+    state["total_paused_duration"] = 0.0
+    state["pause_start_time"] = None
     
     text_ch = state["text_channel"]
     vc = song["vc"]
@@ -4392,6 +4706,7 @@ async def play_next_song(guild, client):
         # Apply volume
         audio_source = discord.PCMVolumeTransformer(audio_source, volume=state.get("volume", 1.0))
         vc_client.play(audio_source, after=after_playing)
+        state["song_start_time"] = time.time()
         
         # 3. 🟢 NEON GREEN MUSIC DECK
         embed = discord.Embed(
@@ -4426,36 +4741,45 @@ async def play_next_song(guild, client):
 
 async def prefetch_and_translate_lyrics(song, text_ch):
     try:
-        import re
-        clean_title = re.sub(r'[\(\[].*?[\)\]]', '', song["title"]).strip()
-        
-        # 1. Search only in authentic global database
-        lrc_data = await asyncio.to_thread(syncedlyrics.search, clean_title)
+        # 1. Fetch from 4-Tier Lyrics Harvester
+        lrc_data = await fetch_best_lrc_lyrics(song)
         
         if not lrc_data:
             song["lyrics_cache"] = "NOT_FOUND"
             return
+
+        # 2. Immediately populate raw timestamped lines so Live Scrolling works with 0 delay!
+        raw_lrc_lines = [line.strip() for line in lrc_data.split('\n') if re.match(r'^\[\d+:\d+', line.strip())]
+        if raw_lrc_lines:
+            song["lyrics_cache"] = raw_lrc_lines
+            song["ai_translated"] = False
+        else:
+            song["lyrics_cache"] = "NOT_FOUND"
+            return
             
-        # 2. Only translate if authentic LRC is found
+        # 3. Upgrade in background with AI Sensei Hiragana/Katakana + Romaji lines
         prompt = (
-            f"Here is a timestamped LRC lyrics file. Translate the lyrics line-by-line.\n"
+            f"Here is a timestamped LRC lyrics file. Convert/translate the lyrics line-by-line for Japanese learners.\n"
             f"RULES:\n"
             f"1. DO NOT change the [mm:ss.xx] timestamps.\n"
-            f"2. For each line, return exactly 3 lines:\n"
-            f"   [Original Timestamp] Original lyrics\n"
-            f"   [Original Timestamp] 100% Hiragana/Katakana translation (NO KANJI ALLOWED)\n"
-            f"   [Original Timestamp] Romaji reading of the Japanese translation\n\n"
-            f"LRC Data (First 1500 chars):\n{lrc_data[:1500]}"
+            f"2. For each timestamped line, output exactly 3 lines with the SAME timestamp:\n"
+            f"   [Original Timestamp] Original lyrics (or Japanese translation if non-Japanese)\n"
+            f"   [Original Timestamp] 100% Hiragana/Katakana reading (NO KANJI ALLOWED)\n"
+            f"   [Original Timestamp] Romaji reading\n\n"
+            f"LRC Data:\n{lrc_data[:3800]}"
         )
 
         raw_text = await generate_gemini_response(prompt)
+        parsed_lyrics = [line.strip() for line in raw_text.split('\n') if re.match(r'^\[\d+:\d+', line.strip())]
         
-        parsed_lyrics = [line for line in raw_text.split('\n') if line.startswith('[')]
-        song["lyrics_cache"] = parsed_lyrics if parsed_lyrics else "ERROR"
+        if parsed_lyrics:
+            song["lyrics_cache"] = parsed_lyrics
+            song["ai_translated"] = True
             
     except Exception as e:
         print(f"Lyrics Engine Error: {e}")
-        song["lyrics_cache"] = "ERROR"
+        if not isinstance(song.get("lyrics_cache"), list):
+            song["lyrics_cache"] = "ERROR"
 
 
 class LiveLyricsView(View):
@@ -4471,8 +4795,8 @@ class LiveLyricsView(View):
         if not isinstance(lyrics_data, list):
             return await interaction.response.send_message("❌ Lyrics are still processing or not found.", ephemeral=True)
             
-        full_text = "\n".join(lyrics_data[:50])
-        embed = discord.Embed(title=f"📜 {self.song['title']} (Static Lyrics)", description=full_text, color=0x39ff14)
+        full_text = "\n".join(lyrics_data)[:3900]
+        embed = discord.Embed(title=f"📜 {self.song['title'][:200]} (Static Lyrics)", description=full_text, color=0x39ff14)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="📖 Extract Vocab", style=discord.ButtonStyle.success)
@@ -4526,8 +4850,12 @@ class MusicDeckView(View):
             vc_client = state.get("vc_client")
             if vc_client and vc_client.is_playing():
                 vc_client.pause()
+                state["pause_start_time"] = time.time()
                 await interaction.response.send_message("⏸️ Music Paused.", ephemeral=True)
             elif vc_client and vc_client.is_paused():
+                if state.get("pause_start_time"):
+                    state["total_paused_duration"] = state.get("total_paused_duration", 0.0) + (time.time() - state["pause_start_time"])
+                    state["pause_start_time"] = None
                 vc_client.resume()
                 await interaction.response.send_message("▶️ Music Resumed.", ephemeral=True)
 
@@ -4540,7 +4868,6 @@ class MusicDeckView(View):
                 vc_client.stop()
                 await interaction.response.send_message("⏭️ Song Skipped.", ephemeral=True)
 
-    # 🟢 FIXED ANIMATED EMOJIS USING emoji= PARAMETER
     @discord.ui.button(label="VOLUME", emoji="<a:arrowup:1563877919506571365>", style=discord.ButtonStyle.secondary, row=0)
     async def btn_vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self.check_dj_lock(interaction):
@@ -4595,22 +4922,23 @@ class MusicDeckView(View):
         song = state["current_song"]
         cache = song.get("lyrics_cache")
         
-        if not cache:
-            return await interaction.response.send_message("⏳ Lyrics are still being processed by AI. Please click again in a few seconds!", ephemeral=True)
-        elif cache == "NOT_FOUND":
+        if cache == "NOT_FOUND":
             return await interaction.response.send_message("❌ No synced lyrics found for this track in the global database.", ephemeral=True)
         elif cache == "ERROR":
             return await interaction.response.send_message("❌ AI Translation engine failed. Please try again later.", ephemeral=True)
             
         embed = discord.Embed(
-            title=f"🎤 Live Karaoke: {song['title']}", 
-            description="```Live scrolling starting...```", 
+            title=f"🎤 Live Karaoke: {song['title'][:200]}", 
+            description="⏳ **Syncing real-time lyrics with audio stream...**", 
             color=0x39ff14
         )
         embed.set_footer(text="Translations by AI Sensei")
         
         view = LiveLyricsView(interaction.user, song, self.guild)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        
+        # 🟢 START REAL-TIME LIVE KARAOKE SCROLLING TASK
+        asyncio.create_task(run_live_karaoke_scroll(interaction, self.guild, song, view))
 
     @discord.ui.button(label="STOP", style=discord.ButtonStyle.danger, row=1)
     async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4690,9 +5018,9 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
                         
             chosen_fmt = None
             if clean_audio:
-                chosen_fmt = clean_audio[-1] # Best clean audio-only stream
+                chosen_fmt = clean_audio[-1]
             elif clean_muxed:
-                chosen_fmt = clean_muxed[-1] # Best clean HLS (m3u8) / muxed stream
+                chosen_fmt = clean_muxed[-1]
                 
             if chosen_fmt:
                 stream_url = chosen_fmt.get('url')
@@ -4700,6 +5028,10 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
         
         song = {
             "title": data.get('title'),
+            "track": data.get('track') or data.get('alt_title'),
+            "artist": data.get('artist') or data.get('creator'),
+            "raw_query": query,
+            "subtitles": data.get('subtitles'),
             "webpage_url": data.get('webpage_url'),
             "url": stream_url,
             "thumbnail": data.get('thumbnail'),
@@ -4722,13 +5054,13 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
         await interaction.edit_original_response(content=f"❌ Error finding song: {e}")
 
 @bot.tree.command(name="music", description="Play high-quality music or search a song (Learning prioritized over Karaoke).")
-@discord.app_commands.describe(song_or_link="Song name, YouTube link, or Spotify track link or Apple-Music track link")
-async def music_cmd(interaction: discord.Interaction, song_or_link: str):
-    await execute_music_command(interaction, song_or_link)
+@discord.app_commands.describe(name_or_link="Song name, YouTube link, or Spotify track link or Apple-Music track link")
+async def music_cmd(interaction: discord.Interaction, name_or_link: str):
+    await execute_music_command(interaction, name_or_link)
 
 @bot.tree.command(name="ongaku", description="Play high-quality music or search a song (Alias for /music).")
-@discord.app_commands.describe(song_or_link="Song name, YouTube link, or Spotify track link or Apple-Music track link")
-async def ongaku_cmd(interaction: discord.Interaction, song_or_link: str):
-    await execute_music_command(interaction, song_or_link)
+@discord.app_commands.describe(name_or_link="Song name, YouTube link, or Spotify track link or Apple-Music track link")
+async def ongaku_cmd(interaction: discord.Interaction, name_or_link: str):
+    await execute_music_command(interaction, name_or_link)
     
 bot.run(os.environ.get("BOT_TOKEN"))
