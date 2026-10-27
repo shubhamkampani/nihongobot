@@ -4506,12 +4506,14 @@ async def fetch_best_lrc_lyrics(song):
                                     synced_candidates.append((diff, item["syncedLyrics"]))
                             if synced_candidates:
                                 synced_candidates.sort(key=lambda x: x[0])
-                                # Prefer YouTube native subtitles if LRCLIB duration is off by >12s (MV intro mismatch)
-                                if synced_candidates[0][0] > 12:
+                                best_diff, best_lrc = synced_candidates[0]
+                                # Prefer YouTube native subtitles if LRCLIB duration is off by >8s (MV intro/outro mismatch)
+                                if best_diff > 8:
                                     yt_sub = await extract_youtube_subtitles_lrc(song)
                                     if yt_sub:
+                                        song["lyric_offset"] = 0.0
                                         return yt_sub
-                                return synced_candidates[0][1]
+                                return best_lrc
             except Exception as e:
                 print(f"LRCLIB search error for '{q}': {e}")
 
@@ -4620,9 +4622,10 @@ async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song,
                 continue
                 
             elapsed = get_current_song_elapsed(state)
-            
-            # 🟢 +2.2 SECONDS LOOKAHEAD OFFSET: Compensates for Discord API edit delay & audio buffer!
-            sync_time = elapsed + 2.2
+            # 🟢 TRUE AUDIO STREAM SYNC:
+            # Subtract 1.8s for FFmpeg m3u8 initial connection buffer + apply any manual/auto MV intro offset
+            lyric_offset = song.get("lyric_offset", 0.0)
+            sync_time = max(0.0, elapsed - 1.8 + lyric_offset)
             
             active_idx = -1
             for idx, b in enumerate(blocks):
@@ -4672,7 +4675,9 @@ async def run_live_karaoke_scroll(interaction: discord.Interaction, guild, song,
                     description=new_desc,
                     color=0x39ff14
                 )
-                embed.set_footer(text=f"{ai_status} • Translations by AI Sensei")
+                offset_val = song.get("lyric_offset", 0.0)
+                offset_str = f" • Sync: {offset_val:+.0f}s" if offset_val != 0 else ""
+                embed.set_footer(text=f"{ai_status}{offset_str} • Translations by AI Sensei")
                 
                 try:
                     await interaction.edit_original_response(embed=embed, view=view)
@@ -4835,7 +4840,19 @@ class LiveLyricsView(View):
         self.song = song
         self.guild = guild
 
-    @discord.ui.button(label="📜 Show Full Static Lyrics", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="⏪ -2s", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_sync_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Delays lyrics by 2 seconds (Use when lyrics appear BEFORE the singer sings)
+        self.song["lyric_offset"] = self.song.get("lyric_offset", 0.0) - 2.0
+        await interaction.response.defer()
+
+    @discord.ui.button(label="⏩ +2s", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_sync_fwd(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Advances lyrics by 2 seconds (Use when lyrics appear AFTER the singer sings)
+        self.song["lyric_offset"] = self.song.get("lyric_offset", 0.0) + 2.0
+        await interaction.response.defer()
+
+    @discord.ui.button(label="📜 Show Full Static Lyrics", style=discord.ButtonStyle.secondary, row=0)
     async def btn_static(self, interaction: discord.Interaction, button: discord.ui.Button):
         lyrics_data = self.song.get("lyrics_cache", [])
         if not isinstance(lyrics_data, list):
@@ -4845,7 +4862,7 @@ class LiveLyricsView(View):
         embed = discord.Embed(title=f"📜 {self.song['title'][:200]} (Static Lyrics)", description=full_text, color=0x39ff14)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="📖 Extract Vocab", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="📖 Extract Vocab", style=discord.ButtonStyle.success, row=0)
     async def btn_extract(self, interaction: discord.Interaction, button: discord.ui.Button):
         lyrics_data = self.song.get("lyrics_cache", [])
         if not isinstance(lyrics_data, list):
