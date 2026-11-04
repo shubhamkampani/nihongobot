@@ -4295,9 +4295,9 @@ deno_bin_dir = os.path.expanduser("~/.deno/bin")
 if deno_bin_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] = f"{deno_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
-# 🟢 PRIMARY ENGINE: Uses 'android_vr' & 'ios' clients (100% immune to Datacenter 403, GVS PO Tokens & HLS segment blocks)
+# 🟢 UNIVERSAL YTDL CONFIG: Uses web & tv client with cookies to bypass PO token checks completely
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
@@ -4310,10 +4310,10 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
     'remote_components': ['ejs:github'],
-    # 🟢 Exact working client order with valid cookies.txt
+    # 'web' and 'tv' clients with cookies avoid mweb PO-token traps completely
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv', 'ios', 'mweb', 'web']
+            'player_client': ['web', 'tv', 'ios']
         }
     }
 }
