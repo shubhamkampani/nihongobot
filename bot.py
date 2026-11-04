@@ -4156,11 +4156,13 @@ async def update_bot(interaction: discord.Interaction):
             "pytz",
             "yt-dlp[default]",
             "yt-dlp-ejs",
-            "syncedlyrics"
+            "syncedlyrics",
+            "rapidfuzz",
+            "PyNaCl"
         ]
         
-        # Run pip upgrade with --pre so yt-dlp and yt-dlp-ejs always get latest challenge solvers
-        command = [sys.executable, "-m", "pip", "install", "--upgrade", "--pre"] + packages_to_update
+        # Run stable pip upgrade so experimental nightly builds don't break extractors
+        command = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages_to_update
         result = subprocess.run(command, capture_output=True, text=True)
         
         if result.returncode == 0:
@@ -4293,9 +4295,30 @@ deno_bin_dir = os.path.expanduser("~/.deno/bin")
 if deno_bin_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] = f"{deno_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
+# 🟢 PRIMARY ENGINE: Uses 'android_vr' & 'ios' clients (100% immune to Datacenter 403, GVS PO Tokens & HLS segment blocks)
 ytdl_format_options = {
-    # 🟢 Force yt-dlp to prefer m3u8 (HLS) streams which never have 'siu=1' or 403 errors
-    'format': 'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/bestaudio/best',
+    'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': False,
+    'no_warnings': False,
+    'default_search': 'ytsearch',
+    'source_address': '0.0.0.0',
+    'remote_components': ['ejs:github'],
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android_vr', 'ios', 'tv']
+        }
+    }
+}
+
+# 🟢 FALLBACK ENGINE (With cookies.txt): Only used if a video is age-restricted or requires login
+ytdl_cookie_options = {
+    'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
@@ -4308,15 +4331,15 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
     'remote_components': ['ejs:github'],
-    # 🟢 'web_safari' and 'tv_simply' (tv samsung) always provide clean m3u8 HLS manifests
     'extractor_args': {
         'youtube': {
-            'player_client': ['web_safari', 'tv_simply', 'mweb', 'web']
+            'player_client': ['tv', 'mweb', 'web_safari']
         }
     }
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+ytdl_cookie = yt_dlp.YoutubeDL(ytdl_cookie_options)
 
 def get_current_song_elapsed(state):
     """Calculates exact playback position in seconds, accounting for pauses."""
@@ -4753,8 +4776,13 @@ async def play_next_song(guild, client):
         ua = song.get("http_headers", {}).get("User-Agent", "Mozilla/5.0")
         ua = ua.replace('"', '')
         
+        # 🟢 Pass Referer & Origin headers so FFmpeg never gets 403 on HLS segments or direct streams
+        hdrs = "Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com\r\n"
         current_opts = {
-            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "{ua}"',
+            'before_options': (
+                f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
+                f'-user_agent "{ua}" -headers "{hdrs}"'
+            ),
             'options': '-vn'
         }
 
@@ -5055,49 +5083,61 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
 
     try:
         search_target = query if query.startswith(("http://", "https://")) else f"ytsearch:{query}"
-        data = await asyncio.to_thread(lambda: ytdl.extract_info(search_target, download=False))
+        
+        # 🟢 Try Primary 403-Immune Engine (android_vr / ios) first, fallback to Cookie Engine if needed
+        try:
+            data = await asyncio.to_thread(lambda: ytdl.extract_info(search_target, download=False))
+        except Exception:
+            data = await asyncio.to_thread(lambda: ytdl_cookie.extract_info(search_target, download=False))
+            
         if 'entries' in data:
             data = data['entries'][0]
             
         mins, secs = divmod(data.get('duration', 0), 60)
         
-        # 🟢 SMART STREAM SELECTOR: Strictly prioritize m3u8 (HLS) & reject 'siu=1'
+        # 🟢 SMART STREAM SELECTOR:
+        # 1. Prefer direct audio from android_vr/ios (no siu=1, no HLS segment 403)
+        # 2. Next prefer audio-only HLS (hls-233/234), avoiding broken web_safari itag=96 video HLS
         stream_url = data.get('url')
         stream_headers = data.get('http_headers', {})
         
         formats = data.get('formats', [])
         if formats:
-            hls_audio = []
-            hls_muxed = []
+            vr_ios_audio = []
             clean_audio = []
+            hls_audio_only = []
             clean_muxed = []
             
             for f in formats:
                 f_url = f.get('url', '')
+                fmt_id = str(f.get('format_id', ''))
                 if not f_url or 'siu=1' in f_url or 'c=WEB_EMBEDDED_PLAYER' in f_url:
                     continue
+                # Skip web_safari muxed video HLS (itag 95/96) that causes segment 403 errors
+                if fmt_id in ['95', '96', '94', '93'] or '/itag/96/' in f_url or '/itag/95/' in f_url:
+                    continue
+                    
                 proto = f.get('protocol', '')
                 vcodec = f.get('vcodec', 'none')
                 acodec = f.get('acodec', 'none')
                 
-                # Priority 1 & 2: HLS (m3u8) streams (Immune to GVS PO Token & 403 Forbidden)
                 if 'm3u8' in proto:
                     if vcodec == 'none':
-                        hls_audio.append(f)
-                    else:
-                        hls_muxed.append(f)
-                # Priority 3 & 4: Clean direct HTTPS streams without siu=1
+                        hls_audio_only.append(f)
                 elif acodec != 'none':
                     if vcodec == 'none':
-                        clean_audio.append(f)
+                        if 'c=ANDROID_VR' in f_url or 'c=IOS' in f_url:
+                            vr_ios_audio.append(f)
+                        else:
+                            clean_audio.append(f)
                     else:
                         clean_muxed.append(f)
                         
             chosen_fmt = None
-            if hls_audio:
-                chosen_fmt = hls_audio[-1]
-            elif hls_muxed:
-                chosen_fmt = hls_muxed[-1]
+            if vr_ios_audio:
+                chosen_fmt = vr_ios_audio[-1]
+            elif hls_audio_only:
+                chosen_fmt = hls_audio_only[-1]
             elif clean_audio:
                 chosen_fmt = clean_audio[-1]
             elif clean_muxed:
