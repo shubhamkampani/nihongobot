@@ -4308,38 +4308,17 @@ ytdl_format_options = {
     'no_warnings': False,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'remote_components': ['ejs:github'],
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android_vr', 'ios', 'tv']
-        }
-    }
-}
-
-# 🟢 FALLBACK ENGINE (With cookies.txt): Only used if a video is age-restricted or requires login
-ytdl_cookie_options = {
-    'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': False,
-    'no_warnings': False,
-    'default_search': 'ytsearch',
-    'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
     'remote_components': ['ejs:github'],
+    # 🟢 Exact working client order with valid cookies.txt
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv', 'mweb', 'web_safari']
+            'player_client': ['tv', 'ios', 'mweb', 'web']
         }
     }
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
-ytdl_cookie = yt_dlp.YoutubeDL(ytdl_cookie_options)
 
 def get_current_song_elapsed(state):
     """Calculates exact playback position in seconds, accounting for pauses."""
@@ -5083,63 +5062,49 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
 
     try:
         search_target = query if query.startswith(("http://", "https://")) else f"ytsearch:{query}"
-        
-        # 🟢 Try Primary 403-Immune Engine (android_vr / ios) first, fallback to Cookie Engine if needed
-        try:
-            data = await asyncio.to_thread(lambda: ytdl.extract_info(search_target, download=False))
-        except Exception:
-            data = await asyncio.to_thread(lambda: ytdl_cookie.extract_info(search_target, download=False))
-            
+        data = await asyncio.to_thread(lambda: ytdl.extract_info(search_target, download=False))
         if 'entries' in data:
             data = data['entries'][0]
             
         mins, secs = divmod(data.get('duration', 0), 60)
         
-        # 🟢 SMART STREAM SELECTOR:
-        # 1. Prefer direct audio from android_vr/ios (no siu=1, no HLS segment 403)
-        # 2. Next prefer audio-only HLS (hls-233/234), avoiding broken web_safari itag=96 video HLS
+        # 🟢 EXACT WORKING STREAM SELECTOR:
+        # Picks clean audio-only streams (itag 251/140 or hls-audio) and rejects 'c=WEB' itag=18 & 'siu=1'
         stream_url = data.get('url')
         stream_headers = data.get('http_headers', {})
         
         formats = data.get('formats', [])
         if formats:
-            vr_ios_audio = []
-            clean_audio = []
-            hls_audio_only = []
+            direct_audio = []
+            hls_audio = []
             clean_muxed = []
             
             for f in formats:
                 f_url = f.get('url', '')
                 fmt_id = str(f.get('format_id', ''))
-                if not f_url or 'siu=1' in f_url or 'c=WEB_EMBEDDED_PLAYER' in f_url:
-                    continue
-                # Skip web_safari muxed video HLS (itag 95/96) that causes segment 403 errors
-                if fmt_id in ['95', '96', '94', '93'] or '/itag/96/' in f_url or '/itag/95/' in f_url:
-                    continue
-                    
                 proto = f.get('protocol', '')
                 vcodec = f.get('vcodec', 'none')
                 acodec = f.get('acodec', 'none')
                 
-                if 'm3u8' in proto:
-                    if vcodec == 'none':
-                        hls_audio_only.append(f)
-                elif acodec != 'none':
-                    if vcodec == 'none':
-                        if 'c=ANDROID_VR' in f_url or 'c=IOS' in f_url:
-                            vr_ios_audio.append(f)
-                        else:
-                            clean_audio.append(f)
-                    else:
-                        clean_muxed.append(f)
+                # Reject poisoned links & muxed video HLS (95/96)
+                if not f_url or 'siu=1' in f_url or 'c=WEB_EMBEDDED_PLAYER' in f_url:
+                    continue
+                if fmt_id in ['18', '95', '96', '94', '93', '92', '91']:
+                    continue
+                    
+                if vcodec == 'none':
+                    if 'm3u8' in proto:
+                        hls_audio.append(f)
+                    elif acodec != 'none':
+                        direct_audio.append(f)
+                elif acodec != 'none' and 'm3u8' not in proto:
+                    clean_muxed.append(f)
                         
             chosen_fmt = None
-            if vr_ios_audio:
-                chosen_fmt = vr_ios_audio[-1]
-            elif hls_audio_only:
-                chosen_fmt = hls_audio_only[-1]
-            elif clean_audio:
-                chosen_fmt = clean_audio[-1]
+            if direct_audio:
+                chosen_fmt = direct_audio[-1] # Priority 1: Pure Opus/M4A Audio (itag 251/140 from tv/mweb)
+            elif hls_audio:
+                chosen_fmt = hls_audio[-1]    # Priority 2: Audio-only HLS (hls-233/234)
             elif clean_muxed:
                 chosen_fmt = clean_muxed[-1]
                 
