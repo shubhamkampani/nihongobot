@@ -4156,13 +4156,11 @@ async def update_bot(interaction: discord.Interaction):
             "pytz",
             "yt-dlp[default]",
             "yt-dlp-ejs",
-            "syncedlyrics",
-            "rapidfuzz",
-            "PyNaCl"
+            "syncedlyrics"
         ]
         
-        # Run stable pip upgrade so experimental nightly builds don't break extractors
-        command = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages_to_update
+        # Run pip upgrade with --pre so yt-dlp and yt-dlp-ejs always get latest challenge solvers
+        command = [sys.executable, "-m", "pip", "install", "--upgrade", "--pre"] + packages_to_update
         result = subprocess.run(command, capture_output=True, text=True)
         
         if result.returncode == 0:
@@ -4295,9 +4293,9 @@ deno_bin_dir = os.path.expanduser("~/.deno/bin")
 if deno_bin_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] = f"{deno_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
-# 🟢 UNIVERSAL YTDL CONFIG: Uses web & tv client with cookies to bypass PO token checks completely
 ytdl_format_options = {
-    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+    # 🟢 Force yt-dlp to prefer m3u8 (HLS) streams which never have 'siu=1' or 403 errors
+    'format': 'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
@@ -4310,10 +4308,10 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
     'remote_components': ['ejs:github'],
-    # 'web' and 'tv' clients with cookies avoid mweb PO-token traps completely
+    # 🟢 'web_safari' and 'tv_simply' (tv samsung) always provide clean m3u8 HLS manifests
     'extractor_args': {
         'youtube': {
-            'player_client': ['web', 'tv', 'ios']
+            'player_client': ['web_safari', 'tv_simply', 'mweb', 'web']
         }
     }
 }
@@ -4755,13 +4753,8 @@ async def play_next_song(guild, client):
         ua = song.get("http_headers", {}).get("User-Agent", "Mozilla/5.0")
         ua = ua.replace('"', '')
         
-        # 🟢 Pass Referer & Origin headers so FFmpeg never gets 403 on HLS segments or direct streams
-        hdrs = "Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com\r\n"
         current_opts = {
-            'before_options': (
-                f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
-                f'-user_agent "{ua}" -headers "{hdrs}"'
-            ),
+            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "{ua}"',
             'options': '-vn'
         }
 
@@ -5068,43 +5061,45 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
             
         mins, secs = divmod(data.get('duration', 0), 60)
         
-        # 🟢 EXACT WORKING STREAM SELECTOR:
-        # Picks clean audio-only streams (itag 251/140 or hls-audio) and rejects 'c=WEB' itag=18 & 'siu=1'
+        # 🟢 SMART STREAM SELECTOR: Strictly prioritize m3u8 (HLS) & reject 'siu=1'
         stream_url = data.get('url')
         stream_headers = data.get('http_headers', {})
         
         formats = data.get('formats', [])
         if formats:
-            direct_audio = []
             hls_audio = []
+            hls_muxed = []
+            clean_audio = []
             clean_muxed = []
             
             for f in formats:
                 f_url = f.get('url', '')
-                fmt_id = str(f.get('format_id', ''))
+                if not f_url or 'siu=1' in f_url or 'c=WEB_EMBEDDED_PLAYER' in f_url:
+                    continue
                 proto = f.get('protocol', '')
                 vcodec = f.get('vcodec', 'none')
                 acodec = f.get('acodec', 'none')
                 
-                # Reject poisoned links & muxed video HLS (95/96)
-                if not f_url or 'siu=1' in f_url or 'c=WEB_EMBEDDED_PLAYER' in f_url:
-                    continue
-                if fmt_id in ['18', '95', '96', '94', '93', '92', '91']:
-                    continue
-                    
-                if vcodec == 'none':
-                    if 'm3u8' in proto:
+                # Priority 1 & 2: HLS (m3u8) streams (Immune to GVS PO Token & 403 Forbidden)
+                if 'm3u8' in proto:
+                    if vcodec == 'none':
                         hls_audio.append(f)
-                    elif acodec != 'none':
-                        direct_audio.append(f)
-                elif acodec != 'none' and 'm3u8' not in proto:
-                    clean_muxed.append(f)
+                    else:
+                        hls_muxed.append(f)
+                # Priority 3 & 4: Clean direct HTTPS streams without siu=1
+                elif acodec != 'none':
+                    if vcodec == 'none':
+                        clean_audio.append(f)
+                    else:
+                        clean_muxed.append(f)
                         
             chosen_fmt = None
-            if direct_audio:
-                chosen_fmt = direct_audio[-1] # Priority 1: Pure Opus/M4A Audio (itag 251/140 from tv/mweb)
-            elif hls_audio:
-                chosen_fmt = hls_audio[-1]    # Priority 2: Audio-only HLS (hls-233/234)
+            if hls_audio:
+                chosen_fmt = hls_audio[-1]
+            elif hls_muxed:
+                chosen_fmt = hls_muxed[-1]
+            elif clean_audio:
+                chosen_fmt = clean_audio[-1]
             elif clean_muxed:
                 chosen_fmt = clean_muxed[-1]
                 
