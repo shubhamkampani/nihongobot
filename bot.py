@@ -4293,8 +4293,8 @@ deno_bin_dir = os.path.expanduser("~/.deno/bin")
 if deno_bin_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] = f"{deno_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
+# 🟢 PERMANENT COOKIELESS YTDL ENGINE (No cookies.txt needed -> Never expires!)
 ytdl_format_options = {
-    # 🟢 Force yt-dlp to prefer m3u8 (HLS) streams which never have 'siu=1' or 403 errors
     'format': 'bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
@@ -4306,17 +4306,77 @@ ytdl_format_options = {
     'no_warnings': False,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'cookiefile': 'cookies.txt',
+    'cachedir': False, # Prevents stale token caching on Ubuntu
     'remote_components': ['ejs:github'],
-    # 🟢 'web_safari' and 'tv_simply' (tv samsung) always provide clean m3u8 HLS manifests
+    # 'tv_embedded', 'android_vr', 'ios', and 'web_safari' work without cookies!
     'extractor_args': {
         'youtube': {
-            'player_client': ['web_safari', 'tv_simply', 'mweb', 'web']
+            'player_client': ['tv_embedded', 'android_vr', 'ios', 'web_safari', 'tv_simply']
         }
     }
 }
 
+# SoundCloud / Generic Fallback Engine via yt-dlp (100% immune to YouTube blocks)
+ytdl_sc_options = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'quiet': True,
+    'no_warnings': True,
+    'source_address': '0.0.0.0',
+    'cachedir': False
+}
+
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+ytdl_sc = yt_dlp.YoutubeDL(ytdl_sc_options)
+
+async def fetch_saavn_fallback_stream(query_str):
+    """Commercial-Bot Secret: High-speed 320kbps direct stream fallback (Zero 403, Zero Cookies)."""
+    clean_q = re.sub(r'https?://\S+', '', query_str).strip()
+    if not clean_q:
+        return None
+    apis = [
+        f"https://saavn.dev/api/search/songs?query={urllib.parse.quote(clean_q)}&limit=1",
+        f"https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query={urllib.parse.quote(clean_q)}&limit=1"
+    ]
+    async with aiohttp.ClientSession() as session:
+        for api_url in apis:
+            try:
+                async with session.get(api_url, timeout=6) as resp:
+                    if resp.status != 200:
+                        continue
+                    res_json = await resp.json()
+                    results = (res_json.get("data", {}) or {}).get("results", [])
+                    if not results:
+                        continue
+                    top = results[0]
+                    dl_urls = top.get("downloadUrl") or top.get("download_url") or []
+                    stream_link = None
+                    if isinstance(dl_urls, list) and dl_urls:
+                        stream_link = dl_urls[-1].get("url") or dl_urls[-1].get("link")
+                    if not stream_link:
+                        continue
+                    dur = int(top.get("duration") or 180)
+                    imgs = top.get("image") or []
+                    thumb = imgs[-1].get("url") or imgs[-1].get("link") if isinstance(imgs, list) and imgs else None
+                    artists = top.get("primaryArtists") or ""
+                    if not artists and isinstance(top.get("artists", {}).get("primary"), list):
+                        artists = ", ".join(a.get("name", "") for a in top["artists"]["primary"] if a.get("name"))
+                    title_clean = html_title = (top.get("name") or clean_q).replace("&quot;", '"').replace("&amp;", "&")
+                    return {
+                        "title": f"{title_clean} - {artists}" if artists else title_clean,
+                        "track": title_clean,
+                        "artist": artists,
+                        "webpage_url": top.get("url") or "https://www.youtube.com",
+                        "url": stream_link,
+                        "thumbnail": thumb,
+                        "duration": dur,
+                        "uploader": artists or "Official Audio",
+                        "http_headers": {"User-Agent": "Mozilla/5.0"}
+                    }
+            except Exception as e:
+                print(f"Mirror API fallback notice: {e}")
+    return None
 
 def get_current_song_elapsed(state):
     """Calculates exact playback position in seconds, accounting for pauses."""
@@ -5055,11 +5115,45 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
 
     try:
         search_target = query if query.startswith(("http://", "https://")) else f"ytsearch:{query}"
-        data = await asyncio.to_thread(lambda: ytdl.extract_info(search_target, download=False))
-        if 'entries' in data:
-            data = data['entries'][0]
+        data = None
+        
+        # 🟢 TIER 1: Cookieless YouTube Extraction (tv_embedded / android_vr / ios / web_safari)
+        try:
+            data = await asyncio.to_thread(lambda: ytdl.extract_info(search_target, download=False))
+            if data and 'entries' in data and data['entries']:
+                data = data['entries'][0]
+        except Exception as yt_err:
+            print(f"⚠️ Primary YT Engine blocked ({yt_err}), switching to Mirror/SoundCloud Engine...")
+            data = None
+
+        # If User passed a YouTube URL that failed, grab its title via oEmbed so Mirror/SoundCloud can still find the song!
+        fallback_query = query
+        if not data and query.startswith(("http://", "https://")):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(query)}&format=json"
+                    async with session.get(oembed_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            oem = await resp.json()
+                            fallback_query = f"{oem.get('title', '')} {oem.get('author_name', '')}".strip()
+            except Exception:
+                pass
+
+        # 🟢 TIER 2: High-Speed 320kbps Mirror API (JioSaavn - Instant for Hindi/Punjabi/Japanese/Global tracks)
+        if not data:
+            data = await fetch_saavn_fallback_stream(fallback_query)
+
+        # 🟢 TIER 3: SoundCloud Engine via yt-dlp (Never asks for cookies or PO Tokens!)
+        if not data:
+            sc_query = f"scsearch1:{fallback_query}"
+            sc_data = await asyncio.to_thread(lambda: ytdl_sc.extract_info(sc_query, download=False))
+            if sc_data and 'entries' in sc_data and sc_data['entries']:
+                data = sc_data['entries'][0]
+
+        if not data:
+            raise Exception("Could not extract audio stream from any provider.")
             
-        mins, secs = divmod(data.get('duration', 0), 60)
+        mins, secs = divmod(int(data.get('duration') or 0), 60)
         
         # 🟢 SMART STREAM SELECTOR: Strictly prioritize m3u8 (HLS) & reject 'siu=1'
         stream_url = data.get('url')
@@ -5080,13 +5174,11 @@ async def execute_music_command(interaction: discord.Interaction, query: str):
                 vcodec = f.get('vcodec', 'none')
                 acodec = f.get('acodec', 'none')
                 
-                # Priority 1 & 2: HLS (m3u8) streams (Immune to GVS PO Token & 403 Forbidden)
                 if 'm3u8' in proto:
                     if vcodec == 'none':
                         hls_audio.append(f)
                     else:
                         hls_muxed.append(f)
-                # Priority 3 & 4: Clean direct HTTPS streams without siu=1
                 elif acodec != 'none':
                     if vcodec == 'none':
                         clean_audio.append(f)
