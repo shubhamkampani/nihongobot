@@ -4311,7 +4311,7 @@ ytdl_format_options = {
     # 'tv_embedded', 'android_vr', 'ios', and 'web_safari' work without cookies!
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv_embedded', 'android_vr', 'ios', 'web_safari', 'tv_simply']
+            'player_client': ['android_vr', 'ios', 'web_safari', 'tv_simply']
         }
     }
 }
