@@ -4817,6 +4817,82 @@ async def heal_vault(interaction: discord.Interaction):
             
     await interaction.followup.send(f"✅ **Healing & Cleanup Complete!**\n- Successfully recovered: **{healed_count} flashcards**.\n- Orphaned vaults deleted: **{len(deleted_users)} users**.", ephemeral=True)
 
+@bot.tree.command(name="triggersrs", description="[Admin Only] Manually send a user's due Vocab Vault SRS review inside their vault thread.")
+@app_commands.describe(include_all="Optional: Set True to include all saved cards even if none are due right now (useful for testing).")
+async def trigger_srs_manual(interaction: discord.Interaction, include_all: bool = False):
+    # 1. Strict Admin Role Check
+    allowed_admin_roles = [
+        "Junior Admin（ジュニア・アデュミン）",
+        "Senior Admin（セィニア・アデュミン）",
+        "Founder（ファウンダ）"
+    ]
+    if not any(role.name in allowed_admin_roles for role in interaction.user.roles):
+        return await interaction.response.send_message(
+            "❌ Only admins can use this command.",
+            ephemeral=True
+        )
+
+    # 2. Strict User-Specific Vocab Vault Thread Check
+    is_vault_thread = (
+        isinstance(interaction.channel, discord.Thread)
+        and interaction.channel.parent is not None
+        and interaction.channel.parent.name == "📸・vocab-vault"
+        and interaction.channel.name.endswith("'s Vault")
+    )
+    if not is_vault_thread:
+        return await interaction.response.send_message(
+            "❌ This command can only be used in the Vocab Vault of a particular user.",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+    thread = interaction.channel
+
+    # 3. Extract Vault Owner from Thread Name ("🧵 username's Vault")
+    owner_name = thread.name.replace("🧵 ", "", 1)
+    if owner_name.endswith("'s Vault"):
+        owner_name = owner_name[:-len("'s Vault")].strip()
+
+    target_user = discord.utils.find(lambda m: m.name == owner_name, interaction.guild.members)
+    if not target_user:
+        target_user = discord.utils.find(lambda m: m.name.lower() == owner_name.lower(), interaction.guild.members)
+
+    if not target_user:
+        return await interaction.followup.send(
+            f"❌ Could not find a server member matching `{owner_name}` for this vault.",
+            ephemeral=True
+        )
+
+    # 4. Fetch Due Flashcards from MongoDB
+    current_time = int(time.time())
+    query = {"user_id": target_user.id}
+    if not include_all:
+        query["next_review"] = {"$lte": current_time}
+
+    due_words = list(vocab_db.find(query))
+    if not due_words:
+        return await interaction.followup.send(
+            f"ℹ️ {target_user.mention} has **0 due flashcards** right now. *(Run `/triggersrs include_all:True` to force-test with all saved cards.)*",
+            ephemeral=True
+        )
+
+    # 5. Send the SRS Review Card inside the User's Vault Thread
+    embed = discord.Embed(
+        title="🔔 Daily Review Time!",
+        description=(
+            f"Sensei is here! You have **{len(due_words)}** visual flashcards due for review today.\n\n"
+            f"Keep your streak alive to move words into your long-term memory (Level 5).\n"
+            f"*Note: This is a self-practice SRS quiz, your scores here will not be added to `/quiz` leaderboard!*"
+        ),
+        color=0xf1c40f
+    )
+    view = StartReviewView(target_user, due_words)
+    await thread.send(content=target_user.mention, embed=embed, view=view)
+    await interaction.followup.send(
+        f"✅ SRS review card sent for {target_user.mention} (**{len(due_words)}** flashcards)!",
+        ephemeral=True
+    )
+
 # ==========================================
 # 🎵 THE ULTIMATE KARAOKE ENGINE (MUSIC)
 # ==========================================
