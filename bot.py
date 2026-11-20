@@ -31,6 +31,7 @@ import sys
 import os
 import yt_dlp  # 🎵 Music & Live Lyrics Dependencies
 import syncedlyrics
+import sqlite3
 
 # --- 🌐 WEB SERVER ---
 app = Flask('')
@@ -52,6 +53,8 @@ try:
     token_db = db["api_tokens"]
     # 🟢 For storing user flashcards (Vocab Vault)
     vocab_db = db["vocab_vault"]
+    # 🟢 For persistent SRS quiz summaries (no button timeout across restarts)
+    srs_summary_db = db["srs_summaries"]
     print("✅ MongoDB Connected!")
 except Exception as e:
     print(f"❌ MongoDB Error: {e}")
@@ -2032,11 +2035,13 @@ class NihongoBot(commands.Bot):
         self.add_view(PersistentTicketPanelView())
         self.add_view(PersistentTicketCloseView())
         self.add_view(PersistentShadowPanelView())
+        self.add_view(PersistentSRSSummaryView())
         view = View(timeout=None)
         view.add_item(JLPTSelect())
         self.add_view(view)
         self.ai_tracker_loop.start()
         self.vc_cleanup_loop.start()
+        self.srs_summary_cleanup_loop.start()
         await self.tree.sync()
         print("✅ Commands Synced & Tasks Started.")
 
@@ -2491,6 +2496,22 @@ class NihongoBot(commands.Bot):
                         await vc.delete(reason="8 hour auto-delete limit reached.")
                     except Exception as e:
                         print(f"Failed to delete VC: {e}")
+
+
+      # 🟢 7-Day SRS Summary Auto-Expiry Loop (Local SQLite -> In-Place Edit)
+    @tasks.loop(hours=1)
+    async def srs_summary_cleanup_loop(self):
+        try:
+            expired_rows = pop_expired_srs_summaries_sqlite(int(time.time()))
+            for msg_id, ch_id, uid in expired_rows:
+                await expire_srs_summary_message(self, ch_id, msg_id, uid, reason="expired")
+                await asyncio.sleep(1.0)
+        except Exception as e:
+            print(f"SRS Summary Cleanup Error: {e}")
+
+    @srs_summary_cleanup_loop.before_loop
+    async def before_srs_summary_cleanup_loop(self):
+        await self.wait_until_ready()               
 
 bot = NihongoBot()
 
@@ -3925,124 +3946,636 @@ async def on_message(message: discord.Message):
 # ==========================================
 # 🧠 VISUAL MEMORY VAULT (SPACED REPETITION ENGINE)
 # ==========================================
-import random
+SRS_SUMMARY_PER_PAGE = 8
+SRS_SUMMARY_TTL_SECONDS = 7 * 86400        # 7 days auto-expiry
+SRS_MAX_SUMMARIES = 1000                   # FIFO rotation cap
+SRS_MAX_DB_BYTES = 50 * 1024 * 1024        # 50 MB hard safety cap on Ubuntu disk
+SRS_SQLITE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "srs_summaries.db")
+
+
+def init_srs_sqlite():
+    conn = sqlite3.connect(SRS_SQLITE_PATH)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS srs_summaries (
+                message_id INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                correct INTEGER NOT NULL,
+                attempted INTEGER NOT NULL,
+                total_due INTEGER NOT NULL,
+                mastered INTEGER NOT NULL,
+                wrong_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+init_srs_sqlite()
+
+
+def save_srs_summary_sqlite(doc):
+    """Saves summary locally on Ubuntu & runs FIFO rotation if cap/size exceeded."""
+    evicted = []
+    conn = sqlite3.connect(SRS_SQLITE_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO srs_summaries
+            (message_id, channel_id, user_id, correct, attempted, total_due, mastered, wrong_json, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            doc["message_id"],
+            doc["channel_id"],
+            doc["user_id"],
+            doc["correct"],
+            doc["attempted"],
+            doc["total_due"],
+            doc["mastered"],
+            json.dumps(doc["wrong"], ensure_ascii=False),
+            doc["created_at"],
+            doc["expires_at"]
+        ))
+        conn.commit()
+
+        # 🟢 FIFO Rotation Check (Row Cap or Disk Cap)
+        cur.execute("SELECT COUNT(*) FROM srs_summaries")
+        total_rows = cur.fetchone()[0]
+        db_size = os.path.getsize(SRS_SQLITE_PATH) if os.path.exists(SRS_SQLITE_PATH) else 0
+
+        overflow = max(0, total_rows - SRS_MAX_SUMMARIES)
+        if overflow == 0 and db_size > SRS_MAX_DB_BYTES and total_rows > 1:
+            overflow = min(10, total_rows - 1)
+
+        if overflow > 0:
+            cur.execute("""
+                SELECT message_id, channel_id, user_id
+                FROM srs_summaries
+                WHERE message_id != ?
+                ORDER BY created_at ASC
+                LIMIT ?
+            """, (doc["message_id"], overflow))
+            evicted = cur.fetchall()
+            if evicted:
+                cur.executemany("DELETE FROM srs_summaries WHERE message_id = ?", [(r[0],) for r in evicted])
+                conn.commit()
+    finally:
+        conn.close()
+    return evicted
+
+
+def get_srs_summary_sqlite(message_id):
+    conn = sqlite3.connect(SRS_SQLITE_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT message_id, channel_id, user_id, correct, attempted, total_due, mastered, wrong_json, created_at, expires_at
+            FROM srs_summaries
+            WHERE message_id = ?
+        """, (message_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "message_id": row[0],
+            "channel_id": row[1],
+            "user_id": row[2],
+            "correct": row[3],
+            "attempted": row[4],
+            "total_due": row[5],
+            "mastered": row[6],
+            "wrong": json.loads(row[7]) if row[7] else [],
+            "created_at": row[8],
+            "expires_at": row[9]
+        }
+    finally:
+        conn.close()
+
+
+def delete_srs_summary_sqlite(message_id):
+    conn = sqlite3.connect(SRS_SQLITE_PATH)
+    try:
+        conn.execute("DELETE FROM srs_summaries WHERE message_id = ?", (message_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def pop_expired_srs_summaries_sqlite(now_ts):
+    conn = sqlite3.connect(SRS_SQLITE_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT message_id, channel_id, user_id FROM srs_summaries WHERE expires_at <= ?", (now_ts,))
+        rows = cur.fetchall()
+        if rows:
+            cur.executemany("DELETE FROM srs_summaries WHERE message_id = ?", [(r[0],) for r in rows])
+            conn.commit()
+        return rows
+    finally:
+        conn.close()
+
+
+async def expire_srs_summary_message(bot_client, channel_id, message_id, user_id, reason="memory"):
+    """Quietly edits an expired/evicted summary card in-place to disable buttons & inform the user."""
+    try:
+        channel = bot_client.get_channel(channel_id)
+        if channel is None:
+            channel = await bot_client.fetch_channel(channel_id)
+        if isinstance(channel, discord.Thread) and channel.archived:
+            try:
+                await channel.edit(archived=False)
+            except Exception:
+                return
+
+        msg = await channel.fetch_message(message_id)
+        embed = msg.embeds[0] if msg.embeds else None
+
+        if reason == "expired":
+            notice = (
+                f"<@{user_id}> | ⏳ **すみません**, your 7-day interactive window for this summary has expired "
+                f"(buttons won't work anymore, but your score & table remain readable below)."
+            )
+            footer_txt = "🔒 7-Day Window Expired • Interactive buttons disabled"
+        else:
+            notice = (
+                f"<@{user_id}> | ⚠️ **すみません**, due to memory limitations, your summary view can't be accessed anymore "
+                f"(buttons won't work, but your score & table remain readable below)."
+            )
+            footer_txt = "🔒 Cleared due to memory limitations • Interactive buttons disabled"
+
+        if embed:
+            embed.color = discord.Color.light_grey()
+            embed.set_footer(text=footer_txt)
+
+        await msg.edit(content=notice, embed=embed, view=None)
+    except Exception:
+        pass
+
+
+def format_jp_word(kanji, kana):
+    """Formats Japanese word cleanly with furigana in brackets without duplicating identical kana."""
+    kanji = (kanji or "").strip()
+    kana = (kana or "").strip()
+    if kana and kana != kanji:
+        return f"{kanji} ({kana})"
+    return kanji or kana or "Unknown"
+
+
+def build_srs_summary_embed(summary_doc, page=1):
+    """Builds the permanent SRS Summary Card (3-column Desktop + clean numbered Mobile view)."""
+    correct = summary_doc.get("correct", 0)
+    attempted = summary_doc.get("attempted", 0)
+    total_due = summary_doc.get("total_due", attempted)
+    mastered = summary_doc.get("mastered", 0)
+    wrong = summary_doc.get("wrong", [])
+    expires_at = summary_doc.get("expires_at", int(time.time()) + SRS_SUMMARY_TTL_SECONDS)
+
+    desc = (
+        f"**{correct}/{attempted}** answers were correct! "
+        f"Keep practising to lock them permanently in your brain cells after the vocab reaches Level 5."
+    )
+    if mastered > 0:
+        desc += f"\n🏆 **Mastered this session:** {mastered} word(s) archived to long-term memory!"
+    if attempted < total_due:
+        remaining = total_due - attempted
+        desc += f"\n📌 *{remaining} remaining due card(s) saved for your next review.*"
+
+    if not wrong:
+        desc += "\n\n🌟 **Flawless Victory!** Zero mistakes — Sensei is proud of you!"
+        embed = discord.Embed(
+            title="📊 Daily Vocab Review Summary",
+            description=desc,
+            color=0x2ecc71
+        )
+        embed.set_footer(text="Vault Review Summary • 100% Accuracy")
+        return embed
+
+    desc += f"\n⏳ **Interactive buttons valid until:** <t:{expires_at}:F> (<t:{expires_at}:R>)"
+
+    total_pages = max(1, (len(wrong) + SRS_SUMMARY_PER_PAGE - 1) // SRS_SUMMARY_PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start_idx = (page - 1) * SRS_SUMMARY_PER_PAGE
+    page_items = wrong[start_idx : start_idx + SRS_SUMMARY_PER_PAGE]
+
+    q_lines = []
+    chosen_lines = []
+    ans_lines = []
+
+    for offset, item in enumerate(page_items):
+        num = start_idx + offset + 1
+        q_text = str(item.get("q", "Unknown")).strip()
+        if len(q_text) > 24:
+            q_text = q_text[:21] + "..."
+        q_lines.append(f"`{num}.` {q_text}")
+        chosen_lines.append(f"`{num}.` {item.get('chosen', 'Unknown')}")
+        ans_lines.append(f"`{num}.` {item.get('ans', 'Unknown')}")
+
+    embed = discord.Embed(
+        title="📊 Daily Vocab Review Summary",
+        description=f"{desc}\n\n📋 **Mistakes Breakdown ({len(wrong)} total):**",
+        color=0xf1c40f
+    )
+    embed.add_field(name="📝 Question", value="\n".join(q_lines)[:1024], inline=True)
+    embed.add_field(name="❌ Option Chosen", value="\n".join(chosen_lines)[:1024], inline=True)
+    embed.add_field(name="✅ Correct Answer", value="\n".join(ans_lines)[:1024], inline=True)
+    embed.set_footer(text=f"Page {page}/{total_pages} • Mistakes: {len(wrong)} • Click 'Get Memory Tricks' anytime!")
+    return embed
+
+
+class MemoryTricksModal(discord.ui.Modal, title="🧠 Personal Memory Tricks"):
+    lang_input = discord.ui.TextInput(
+        label="In which language you want memory tricks?",
+        style=discord.TextStyle.short,
+        placeholder="e.g., English, Hindi, Hinglish, Spanish, French...",
+        required=True,
+        max_length=50
+    )
+    interests_input = discord.ui.TextInput(
+        label="Daily Interests (Optional)",
+        style=discord.TextStyle.short,
+        placeholder="Type your interests and AI sensei will link the memory trick to your interests",
+        required=False,
+        max_length=150
+    )
+
+    def __init__(self, wrong_list):
+        super().__init__()
+        self.wrong_list = wrong_list
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
+        language = self.lang_input.value.strip() or "English"
+        interests = self.interests_input.value.strip()
+
+        target_words = self.wrong_list if has_pro else self.wrong_list[:5]
+        if not target_words:
+            return await interaction.followup.send("✅ No wrong answers found to generate tricks for!", ephemeral=True)
+
+        batch_size = 8
+        total_targets = len(target_words)
+
+        try:
+            for start in range(0, total_targets, batch_size):
+                batch = target_words[start : start + batch_size]
+                word_lines = []
+                for idx, item in enumerate(batch, start=start + 1):
+                    word_lines.append(
+                        f"{idx}. Word: {item.get('ans', '')} | Meaning: {item.get('q', '')}"
+                    )
+                words_block = "\n".join(word_lines)
+
+                interest_instruction = (
+                    f"CRITICAL PERSONALIZATION: Creatively connect the memory tricks to the learner's daily interests/hobbies: '{interests}' so it feels super relatable to their real life."
+                    if interests
+                    else "Creatively connect the memory tricks to fun, relatable everyday real-life situations, objects, or activities."
+                )
+
+                prompt = (
+                    f"You are an expert Japanese memory coach.\n"
+                    f"Create unforgettable, relatable memory tricks (mnemonics) for each Japanese word below.\n"
+                    f"STRICT RULES:\n"
+                    f"1. Write ALL explanations strictly in this language/style: **{language}**.\n"
+                    f"2. Link the sound/pronunciation of the Japanese word (kana/romaji) to a relatable word, pun, object, or daily activity in {language} so the meaning locks into memory effortlessly.\n"
+                    f"3. {interest_instruction}\n"
+                    f"4. Format EVERY word cleanly like this (max 2-3 punchy lines per word, no intro or outro text):\n"
+                    f"**[Number]. [Kanji (Kana)] — [English Meaning]**\n"
+                    f"💡 [Relatable memory trick]\n\n"
+                    f"Words:\n{words_block}"
+                )
+
+                tricks_text = await generate_gemini_response(prompt)
+                end_num = min(start + batch_size, total_targets)
+                title_suffix = f" ({start + 1}–{end_num} of {total_targets})" if total_targets > batch_size else ""
+
+                trick_embed = discord.Embed(
+                    title=f"🧠 Sensei's Memory Tricks [{language}]{title_suffix}",
+                    description=tricks_text[:4000],
+                    color=0x9b59b6
+                )
+                footer_note = f"Linked to: {interests[:80]}" if interests else "Relatable Daily-Life Mnemonics"
+                trick_embed.set_footer(text=footer_note)
+                await interaction.followup.send(embed=trick_embed, ephemeral=True)
+
+            # 🟢 Non-Pro Upsell Message (Exact channel & role mentions)
+            if not has_pro:
+                gopro_ch = discord.utils.get(interaction.guild.channels, name="💎・go-pro") if interaction.guild else None
+                ch_mention = gopro_ch.mention if gopro_ch else "#💎・go-pro"
+                pro_role = discord.utils.get(interaction.guild.roles, name="金 Pro Learners 金") if interaction.guild else None
+                role_mention = pro_role.mention if pro_role else "**Pro Learner**"
+
+                if len(self.wrong_list) > 5:
+                    prefix = f"🔒 *(Free tier shows memory tricks for the first **5** of your **{len(self.wrong_list)}** wrong answers.)*\n"
+                else:
+                    prefix = "💡 *(Free tier is capped at the first **5** wrong answers per summary.)*\n"
+
+                upsell_msg = (
+                    f"{prefix}"
+                    f"To get memory tricks for all the wrong answers, {ch_mention}, and become a {role_mention}."
+                )
+                await interaction.followup.send(content=upsell_msg, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Could not generate memory tricks: {e}", ephemeral=True)
+
+
+class PersistentSRSSummaryView(View):
+    def __init__(self, show_nav=True):
+        super().__init__(timeout=None)
+        if not show_nav:
+            self.remove_item(self.btn_prev)
+            self.remove_item(self.btn_next)
+
+    def _parse_current_page(self, interaction: discord.Interaction):
+        try:
+            footer = interaction.message.embeds[0].footer.text or ""
+            m = re.search(r'Page\s+(\d+)/(\d+)', footer)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+        except Exception:
+            pass
+        return 1, 1
+
+    async def _fetch_valid_doc_or_disable(self, interaction: discord.Interaction):
+        doc = get_srs_summary_sqlite(interaction.message.id)
+        now_ts = int(time.time())
+        is_expired = (doc is not None and now_ts >= doc.get("expires_at", 0))
+
+        if doc is None or is_expired:
+            if is_expired:
+                delete_srs_summary_sqlite(interaction.message.id)
+                reason_txt = "your 7-day interactive window has expired"
+                footer_txt = "🔒 7-Day Window Expired • Interactive buttons disabled"
+            else:
+                reason_txt = "due to memory limitations, your summary view can't be accessed anymore"
+                footer_txt = "🔒 Cleared due to memory limitations • Interactive buttons disabled"
+
+            await interaction.response.send_message(
+                f"🙇 **すみません**, {reason_txt} (buttons won't work).",
+                ephemeral=True
+            )
+            try:
+                embed = interaction.message.embeds[0] if interaction.message.embeds else None
+                if embed:
+                    embed.color = discord.Color.light_grey()
+                    embed.set_footer(text=footer_txt)
+                await interaction.message.edit(
+                    content=f"{interaction.user.mention} | ⚠️ **すみません**, {reason_txt} (buttons won't work).",
+                    embed=embed,
+                    view=None
+                )
+            except Exception:
+                pass
+            return None
+
+        if doc.get("user_id") != interaction.user.id:
+            await interaction.response.send_message("❌ This is not your Vocab Vault summary!", ephemeral=True)
+            return None
+
+        return doc
+
+    @discord.ui.button(label="◀️ Prev", style=discord.ButtonStyle.secondary, custom_id="srs_sum_prev", row=0)
+    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        doc = await self._fetch_valid_doc_or_disable(interaction)
+        if not doc:
+            return
+        curr_page, total_pages = self._parse_current_page(interaction)
+        if curr_page <= 1:
+            return await interaction.response.send_message("ℹ️ You are already on Page 1.", ephemeral=True)
+
+        embed = build_srs_summary_embed(doc, page=curr_page - 1)
+        await interaction.response.edit_message(embed=embed)
+
+    @discord.ui.button(label="▶️ Next", style=discord.ButtonStyle.secondary, custom_id="srs_sum_next", row=0)
+    async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        doc = await self._fetch_valid_doc_or_disable(interaction)
+        if not doc:
+            return
+        curr_page, total_pages = self._parse_current_page(interaction)
+        if curr_page >= total_pages:
+            return await interaction.response.send_message(f"ℹ️ You are already on the last page (Page {total_pages}).", ephemeral=True)
+
+        embed = build_srs_summary_embed(doc, page=curr_page + 1)
+        await interaction.response.edit_message(embed=embed)
+
+    @discord.ui.button(label="🧠 Get Memory Tricks", style=discord.ButtonStyle.primary, custom_id="srs_sum_tricks", row=0)
+    async def btn_tricks(self, interaction: discord.Interaction, button: discord.ui.Button):
+        doc = await self._fetch_valid_doc_or_disable(interaction)
+        if not doc:
+            return
+        wrong_list = doc.get("wrong", [])
+        if not wrong_list:
+            return await interaction.response.send_message("🌟 You had zero wrong answers in this review!", ephemeral=True)
+
+        await interaction.response.send_modal(MemoryTricksModal(wrong_list))
+
 
 class FlashcardQuizView(View):
-    def __init__(self, user, words, current_idx=0):
+    def __init__(self, user, words, current_idx=0, stats=None):
         super().__init__(timeout=None)
         self.user = user
         self.words = words
         self.current_idx = current_idx
+        self.stats = stats if stats is not None else {
+            "correct": 0,
+            "attempted": 0,
+            "mastered": 0,
+            "wrong": []
+        }
+        self.options_map = {}
         self.setup_ui()
-        
+
     def setup_ui(self):
         word = self.words[self.current_idx]
         self.correct_kanji = word.get('kanji', 'Error')
         self.current_word_data = word
-        
-        # 🟢 SMART DISTRACTORS: Pick 3 random words from DB as wrong options (Zero API Call!)
+
+        # 🟢 SMART DISTRACTORS: Pick 3 unique random words from DB (Zero API Call!)
         distractors = list(vocab_db.aggregate([
             {"$match": {"kanji": {"$ne": self.correct_kanji}}},
-            {"$sample": {"size": 3}}
+            {"$sample": {"size": 6}}
         ]))
-        
-        options = [word] + distractors
-        
-        # Fallback words if DB is too new/empty
+
+        seen_kanjis = {self.correct_kanji}
+        options = [word]
+        for d in distractors:
+            dk = d.get('kanji', '')
+            if dk and dk not in seen_kanjis:
+                seen_kanjis.add(dk)
+                options.append(d)
+            if len(options) == 4:
+                break
+
         fallbacks = [
             {"kanji": "猫", "kana": "ねこ", "english": "Cat"},
             {"kanji": "水", "kana": "みず", "english": "Water"},
             {"kanji": "本", "kana": "ほん", "english": "Book"},
             {"kanji": "車", "kana": "くるま", "english": "Car"}
         ]
-        while len(options) < 4:
-            options.append(fallbacks.pop())
-            
+        for fb in fallbacks:
+            if len(options) >= 4:
+                break
+            if fb["kanji"] not in seen_kanjis:
+                seen_kanjis.add(fb["kanji"])
+                options.append(fb)
+
         random.shuffle(options)
-        
+
         for idx, opt in enumerate(options):
-            label = f"{opt.get('kanji', '')} ({opt.get('kana', '')})"
-            btn = Button(label=label[:80], custom_id=f"vocab_{idx}_{opt.get('kanji')}", style=discord.ButtonStyle.primary)
+            cid = f"vocab_opt_{idx}"
+            self.options_map[cid] = opt
+            label = format_jp_word(opt.get('kanji', ''), opt.get('kana', ''))
+            btn = Button(label=label[:80], custom_id=cid, style=discord.ButtonStyle.primary, row=0)
             btn.callback = self.answer_callback
             self.add_item(btn)
 
+    async def finish_and_show_summary(self, interaction: discord.Interaction, status_line=None, ended_early=False):
+        if self.stats["attempted"] == 0:
+            return await interaction.response.edit_message(
+                content=f"{self.user.mention} | ⏹️ Review session closed (0 cards attempted). Your flashcards remain due for later!",
+                embed=None,
+                view=None
+            )
+
+        now_ts = int(time.time())
+        summary_doc = {
+            "message_id": interaction.message.id,
+            "channel_id": interaction.channel_id,
+            "user_id": self.user.id,
+            "correct": self.stats["correct"],
+            "attempted": self.stats["attempted"],
+            "total_due": len(self.words),
+            "mastered": self.stats["mastered"],
+            "wrong": self.stats["wrong"],
+            "created_at": now_ts,
+            "expires_at": now_ts + SRS_SUMMARY_TTL_SECONDS
+        }
+
+        wrong_count = len(self.stats["wrong"])
+
+        # Only store in local SQLite if there are wrong answers needing pagination/memory tricks
+        if wrong_count > 0:
+            try:
+                evicted = save_srs_summary_sqlite(summary_doc)
+                for ev_msg_id, ev_ch_id, ev_uid in evicted:
+                    asyncio.create_task(
+                        expire_srs_summary_message(interaction.client, ev_ch_id, ev_msg_id, ev_uid, reason="memory")
+                    )
+            except Exception as e:
+                print(f"SQLite Summary Save Error: {e}")
+
+            total_pages = max(1, (wrong_count + SRS_SUMMARY_PER_PAGE - 1) // SRS_SUMMARY_PER_PAGE)
+            summary_view = PersistentSRSSummaryView(show_nav=(total_pages > 1))
+        else:
+            summary_view = None
+
+        summary_embed = build_srs_summary_embed(summary_doc, page=1)
+
+        if ended_early:
+            top_content = f"{self.user.mention} | 🏁 **Review ended early!** Here is your session summary:"
+        else:
+            top_content = status_line or f"{self.user.mention} | 🎉 **Review Complete!**"
+
+        await interaction.response.edit_message(content=top_content, embed=summary_embed, view=summary_view)
+
     async def answer_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user.id: return
-        
-        selected_kanji = interaction.data['custom_id'].split("_", 2)[2]
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ This is not your Vocab Vault quiz!", ephemeral=True)
+
+        selected_opt = self.options_map.get(interaction.data['custom_id'], {})
+        selected_kanji = selected_opt.get('kanji', '')
         is_correct = (selected_kanji == self.correct_kanji)
-        
+
+        correct_fmt = format_jp_word(self.correct_kanji, self.current_word_data.get('kana', ''))
+        chosen_fmt = format_jp_word(selected_kanji, selected_opt.get('kana', ''))
+
         current_lvl = self.current_word_data.get('level', 1)
         doc_id = self.current_word_data.get('_id')
-        
+        self.stats["attempted"] += 1
+
         if is_correct:
-            # 🟢 NAYA LOGIC: Mastery & DB Cleanup
-            if current_lvl >= 4: 
+            self.stats["correct"] += 1
+            if current_lvl >= 4:
                 vocab_db.delete_one({"_id": doc_id})
-                msg = f"🏆 **MASTERED!**\n\n✅ **Correct!** You have successfully committed **{self.correct_kanji}** to your long-term memory! It has been officially archived from your daily flashcards.\n\n*🧠 Sensei's Logic: You've proven you know this word deeply. We have removed it from the database to keep your daily reviews fresh and focused on newer, harder words!*"
-                await interaction.response.send_message(msg, ephemeral=True)
+                self.stats["mastered"] += 1
+                status_line = f"{self.user.mention} | 🏆 **MASTERED!** {correct_fmt} locked in long-term memory!"
             else:
                 new_lvl = current_lvl + 1
-                intervals = {1: 1, 2: 3, 3: 7, 4: 14} # Spaced Repetition Days
-                add_days = intervals[new_lvl]
+                intervals = {1: 1, 2: 3, 3: 7, 4: 14}
+                add_days = intervals.get(new_lvl, 14)
                 next_review = int(time.time()) + (add_days * 86400)
-                
                 vocab_db.update_one({"_id": doc_id}, {"$set": {"level": new_lvl, "next_review": next_review}})
-                
-                msg = f"✅ **Correct!**\n\n📈 **Level Promoted:** Level {current_lvl} ➡️ Level {new_lvl}\n📅 **Next Review:** In {add_days} Days.\n\n*🧠 Sensei's Logic: Memory builds through Spaced Repetition. You remembered it today, so we will wait longer ({add_days} days) before testing you again to lock it in your long-term memory!*"
-                await interaction.response.send_message(msg, ephemeral=True)
-            
+                status_line = f"{self.user.mention} | ✅ **Correct!** {correct_fmt} → Level {new_lvl} (Next: {add_days}d)"
         else:
-            new_lvl = 1
-            next_review = int(time.time()) + 86400 # 1 Day
-            vocab_db.update_one({"_id": doc_id}, {"$set": {"level": new_lvl, "next_review": next_review}})
-            
-            msg = f"❌ **Incorrect! The correct answer was {self.correct_kanji} ({self.current_word_data.get('english')}).**\n\n📉 **Level Demoted:** Level {current_lvl} ➡️ Level 1\n📅 **Next Review:** Tomorrow.\n\n*🧠 Sensei's Logic: Forgetting is a normal part of learning. Since you missed it, we reset the word to Level 1 and will test you again tomorrow to strengthen the foundation.*"
-            
-            has_pro = any(r.name == "金 Pro Learners 金" for r in interaction.user.roles)
-            if has_pro:
-                await interaction.response.defer(ephemeral=True)
-                prompt = f"The user forgot the Japanese word '{self.correct_kanji}' (reading: {self.current_word_data.get('kana')}, meaning: {self.current_word_data.get('english')}). Create a very short, funny, 1-2 sentence memory trick/mnemonic combining its English pronunciation and meaning to help them remember it forever."
-                try:
-                    trick = await generate_gemini_response(prompt)
-                    msg += f"\n\n🎁 **Pro Mnemonic Trick:**\n*{trick}*"
-                except: pass
-                await interaction.followup.send(msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(msg, ephemeral=True)
-                
-        # 🟢 Move to next question
+            next_review = int(time.time()) + 86400
+            vocab_db.update_one({"_id": doc_id}, {"$set": {"level": 1, "next_review": next_review}})
+            self.stats["wrong"].append({
+                "q": str(self.current_word_data.get("english") or "Unknown"),
+                "chosen": chosen_fmt,
+                "ans": correct_fmt
+            })
+            status_line = (
+                f"{self.user.mention} | ❌ **Incorrect!** "
+                f"(You chose {chosen_fmt} — you'll get the full summary after the test ends)"
+            )
+
+        # 🟢 Move to next card or show permanent summary
         self.current_idx += 1
         if self.current_idx < len(self.words):
-            new_view = FlashcardQuizView(self.user, self.words, self.current_idx)
+            new_view = FlashcardQuizView(self.user, self.words, self.current_idx, self.stats)
             next_word = self.words[self.current_idx]
-            
-            embed = discord.Embed(title=f"📸 Visual Flashcard ({self.current_idx+1}/{len(self.words)})", description="What is the Japanese word for the object shown in this image?", color=0x3498db)
-            embed.set_image(url=next_word['image_url'])
-            
-            await interaction.message.edit(embed=embed, view=new_view)
+
+            embed = discord.Embed(
+                title=f"📸 Visual Flashcard ({self.current_idx + 1}/{len(self.words)})",
+                description="What is the Japanese word for the object shown in this image?",
+                color=0x3498db
+            )
+            if next_word.get('image_url'):
+                embed.set_image(url=next_word['image_url'])
+
+            await interaction.response.edit_message(content=status_line, embed=embed, view=new_view)
         else:
-            embed = discord.Embed(title="🎉 Review Complete!", description="You have completed all your visual flashcards for today. Awesome job maintaining your study streak!", color=0x2ecc71)
-            await interaction.message.edit(embed=embed, view=None)
+            await self.finish_and_show_summary(interaction, status_line=status_line, ended_early=False)
+
+    @discord.ui.button(label="🏁 Finish & View Summary", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_finish_early(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ This is not your Vocab Vault quiz!", ephemeral=True)
+        await self.finish_and_show_summary(interaction, ended_early=True)
+
 
 class StartReviewView(View):
     def __init__(self, user, words):
         super().__init__(timeout=None)
         self.user = user
         self.words = words
-        
+
     @discord.ui.button(label="▶️ Start Daily Review", style=discord.ButtonStyle.success)
     async def btn_start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user.id: return
-        await interaction.response.defer()
-        
+        if interaction.user.id != self.user.id:
+            return await interaction.response.send_message("❌ This is not your Vocab Vault review!", ephemeral=True)
+
         new_view = FlashcardQuizView(self.user, self.words, 0)
         word = self.words[0]
-        
-        embed = discord.Embed(title=f"📸 Visual Flashcard (1/{len(self.words)})", description="What is the Japanese word for the object shown in this image?", color=0x3498db)
-        embed.set_image(url=word['image_url'])
-        
-        await interaction.message.edit(embed=embed, view=new_view)
+
+        embed = discord.Embed(
+            title=f"📸 Visual Flashcard (1/{len(self.words)})",
+            description="What is the Japanese word for the object shown in this image?",
+            color=0x3498db
+        )
+        if word.get('image_url'):
+            embed.set_image(url=word['image_url'])
+
+        await interaction.response.edit_message(
+            content=f"{self.user.mention} | 🎯 Select the matching Japanese word below!",
+            embed=embed,
+            view=new_view
+        )
 
 @bot.tree.command(name="dropkanji", description="[Admin Only] Manually trigger a Kanji drop for a specific level.")
 @app_commands.choices(level=[app_commands.Choice(name=lvl, value=lvl) for lvl in ["N5", "N4", "N3", "N2", "N1"]])
